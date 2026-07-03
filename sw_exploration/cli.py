@@ -108,6 +108,10 @@ def parse_args() -> argparse.Namespace:
         "--output", default="results.json",
         help="output JSON file path template (auto-numbered, default: results.json)",
     )
+    parser.add_argument("--no-results", action="store_true",
+                        help="skip writing the JSON output file")
+    parser.add_argument("--transpose", action="store_true",
+                        help="swap query and reference for every pair")
     parser.add_argument("--validate-scalar", action="store_true",
                         help="also run scalar DP and flag score mismatches")
     parser.add_argument("--summary", action="store_true",
@@ -157,6 +161,9 @@ def build_pairs(args: argparse.Namespace) -> list[tuple[str, str, str, str]]:
 
     if not pairs:
         pairs.append(("query", "ACACACTA", "reference", "AGCACACA"))
+
+    if args.transpose:
+        pairs = [(rn, rs, qn, qs) for qn, qs, rn, rs in pairs]
 
     return pairs
 
@@ -222,8 +229,9 @@ def main() -> None:
             for event in events:
                 print(f"  {event}")
 
-    output_path = next_output_path(args.output)
-    write_output(output_path, pairs_data, args)
+    if not args.no_results:
+        output_path = next_output_path(args.output)
+        write_output(output_path, pairs_data, args)
 
     total_lazy_f = sum(p["lazy_f_corrections"] for p in pairs_data)
     total_triggers = sum(len(p["lazy_f_triggers"]) for p in pairs_data)
@@ -235,7 +243,8 @@ def main() -> None:
         f", mismatches={mismatches}"
         f", farrar_time={farrar_time(total_times):.6f}s"
     )
-    print(f"output: {output_path}")
+    if not args.no_results:
+        print(f"output: {output_path}")
 
     if args.verbose >= 2:
         print_counts("full counts", total_counts)
