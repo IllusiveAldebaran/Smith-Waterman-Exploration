@@ -1,0 +1,7 @@
+Upstream: https://github.com/cartoonist/kseqpp
+Version:  v4.0.0
+License:  MIT (see LICENSE)
+
+This is a verbatim copy of the kseqpp header-only library.
+Only kseq++.hpp and seqio.hpp are used; config.hpp is included transitively.
+kseq_wrapper.cpp wraps these headers with an extern "C" interface for cffi.
