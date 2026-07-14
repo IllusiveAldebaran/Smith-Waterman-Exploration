@@ -48,16 +48,11 @@ processed together.
   --query-file queries.fa \
   --reference-file references.fa
 
-# random pairs (both counts must be equal)
+# random pairs
 ./smith_waterman_exploration.py \
   --random-count 32 \
   --query-length 64 \
   --reference-length 64
-
-# or separately
-./smith_waterman_exploration.py \
-  --random-query-count 32 --random-reference-count 32 \
-  --query-length 64 --reference-length 64
 
 # combine sources — inline pair + 32 random pairs
 ./smith_waterman_exploration.py \
@@ -96,8 +91,6 @@ processed together.
 --query-file PATH             FASTA file of query sequences
 --reference-file PATH         FASTA file of reference sequences  (alias: --target-file)
 --random-count N              generate N random query/reference pairs
---random-query-count N        generate N random queries (must equal --random-reference-count)
---random-reference-count N    generate N random references
 --query-length INT            length of each random query      default: 32
 --reference-length INT        length of each random reference  default: 32
 --alphabet TEXT               random sequence alphabet         default: ACGT

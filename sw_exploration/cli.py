@@ -56,12 +56,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reference-file", "--target-file",
                         dest="reference_file", default=None,
                         help="FASTA file of reference sequences (paired by index)")
-    parser.add_argument("--random-query-count", type=int, default=None, metavar="N",
-                        help="generate N random query sequences")
-    parser.add_argument("--random-reference-count", type=int, default=None, metavar="N",
-                        help="generate N random reference sequences")
     parser.add_argument("--random-count", type=int, default=None, metavar="N",
-                        help="shorthand for --random-query-count N --random-reference-count N")
+                        help="generate N random query/reference pairs")
     parser.add_argument("--query-length", type=int, default=32,
                         help="length of each randomly generated query (default: 32)")
     parser.add_argument("--reference-length", type=int, default=32,
@@ -108,6 +104,9 @@ def parse_args() -> argparse.Namespace:
         "--output", default="results.json",
         help="output JSON file path template (auto-numbered, default: results.json)",
     )
+    parser.add_argument("--annotate-heatmap", action="store_true",
+                        help="overlay each cell's score value on the heatmap "
+                             "(font auto-scales; save high-dpi for large matrices)")
     parser.add_argument("--no-results", action="store_true",
                         help="skip writing the JSON output file")
     parser.add_argument("--transpose", action="store_true",
@@ -123,12 +122,6 @@ def parse_args() -> argparse.Namespace:
 
 def build_pairs(args: argparse.Namespace) -> list[tuple[str, str, str, str]]:
     """Collect all (query_name, query_seq, ref_name, ref_seq) pairs from all input sources."""
-    if args.random_count is not None:
-        if args.random_query_count is None:
-            args.random_query_count = args.random_count
-        if args.random_reference_count is None:
-            args.random_reference_count = args.random_count
-
     pairs: list[tuple[str, str, str, str]] = []
 
     if args.single_query is not None or args.single_reference is not None:
@@ -141,20 +134,9 @@ def build_pairs(args: argparse.Namespace) -> list[tuple[str, str, str, str]]:
             raise SystemExit("--query-file and --reference-file must be used together")
         pairs.extend(load_fasta_pairs(args.query_file, args.reference_file))
 
-    if args.random_query_count is not None or args.random_reference_count is not None:
-        n_q = args.random_query_count
-        n_r = args.random_reference_count
-        if n_q is None or n_r is None:
-            raise SystemExit(
-                "--random-query-count and --random-reference-count must both be specified"
-            )
-        if n_q != n_r:
-            raise SystemExit(
-                f"--random-query-count ({n_q}) and --random-reference-count "
-                f"({n_r}) must be equal for pairwise alignment"
-            )
+    if args.random_count is not None:
         rng = random.Random(args.seed)
-        for i in range(n_q):
+        for i in range(args.random_count):
             q = random_sequence(args.query_length, args.alphabet, rng)
             r = random_sequence(args.reference_length, args.alphabet, rng)
             pairs.append((f"query_{i}", q, f"reference_{i}", r))
@@ -263,6 +245,7 @@ def main() -> None:
                 fig = build_matrix_figure(
                     vis_pairs,
                     overlays=args.heatmap_overlays,
+                    annotate=args.annotate_heatmap,
                 )
             else:
                 fig = None

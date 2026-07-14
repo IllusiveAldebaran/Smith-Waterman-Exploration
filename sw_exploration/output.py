@@ -125,6 +125,7 @@ def build_matrix_figure(
     pairs: list[dict],
     overlays: list[str] | None = None,
     metric: str = "Smith-Waterman score",
+    annotate: bool = False,
 ):
     """Build a figure showing each pair's H matrix.
 
@@ -190,6 +191,19 @@ def build_matrix_figure(
 
         ax.set_xlabel(f"Query (len={query_len})", fontsize=7)
         ax.set_ylabel(f"Reference (len={ref_len})", fontsize=7)
+
+        if annotate:
+            vmin_val = mat.min()
+            span = (mat.max() - vmin_val) or 1.0
+            # Scale font so it shrinks gracefully for large matrices; floor at 1pt.
+            fontsize = max(1.0, min(5.0, 400.0 / max(query_len + 1, ref_len + 1)))
+            for i in range(mat.shape[0]):
+                for j in range(mat.shape[1]):
+                    val = mat[i, j]
+                    norm = (val - vmin_val) / span
+                    color = "white" if norm > 0.5 else "black"
+                    ax.text(j, i, str(int(val)), ha="center", va="center",
+                            fontsize=fontsize, color=color)
 
         title = f"{p['query_name']} × {p['reference_name']}\nscore={p['score']}"
         ax.set_title(title, fontsize=8, pad=14)

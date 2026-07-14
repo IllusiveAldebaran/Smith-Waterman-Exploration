@@ -99,7 +99,7 @@ def shift_one_lane(v: list[int], insert: int, rec: Recorder, label: str) -> list
     return [insert] + v[:-1]
 
 
-def run(
+def _run_pair(
     query: str,
     reference: str,
     match: int,
@@ -108,24 +108,23 @@ def run(
     gap_extend: int,
     lanes: int,
     rec: Recorder,
-) -> AlignmentResult:
-    """Compute Smith-Waterman score using Farrar's striped method.
+) -> tuple[AlignmentResult, list[list[int]]]:
+    """Align one pair using Farrar's striped method.
 
-    The major Farrar steps recorded here are:
-
-    1. Query profile build.
-    2. Per-reference-symbol main striped DP pass.
-    3. Lazy-F correction pass, which propagates vertical-gap scores across
-       vector lanes until no lane needs further correction.
-
-    Endpoint tie-breaking may differ from scalar DP, but the best score should
-    match.
+    Returns (best_result, h_matrix) where h_matrix is (query_len+1) × (ref_len+1)
+    with row 0 and col 0 as zeros (the DP boundary).  The matrix is reconstructed
+    from h_store after each column's lazy-F pass so the values are fully corrected.
     """
     rec.count("farrar.invocations")
     if lanes < 1:
         raise ValueError("lanes must be >= 1")
+
+    query_len = len(query)
+    ref_len = len(reference)
+    h_matrix = [[0] * (ref_len + 1) for _ in range(query_len + 1)]
+
     if not query or not reference:
-        return AlignmentResult(0, 0, 0)
+        return AlignmentResult(0, 0, 0), h_matrix
 
     alphabet = sorted(set(query) | set(reference))
     profile, seg_len = make_query_profile(query, alphabet, lanes, match, mismatch, rec)
@@ -164,7 +163,7 @@ def run(
 
                 for lane, score in enumerate(h):
                     q_index = striped_index_to_query_index(segment, lane, seg_len)
-                    if q_index < len(query) and score > best.score:
+                    if q_index < query_len and score > best.score:
                         rec.count("farrar.best_score_updates")
                         best = AlignmentResult(score, q_index + 1, reference_pos)
 
@@ -202,14 +201,14 @@ def run(
                     for lane_k, (orig, corr) in enumerate(zip(h, corrected)):
                         if corr > orig:
                             q_idx = striped_index_to_query_index(segment, lane_k, seg_len)
-                            if q_idx < len(query):
+                            if q_idx < query_len:
                                 rec.add_cell_event(
                                     "farrar.lazy_f_trigger", q_idx + 1, reference_pos
                                 )
 
                     for lane, score in enumerate(corrected):
                         q_index = striped_index_to_query_index(segment, lane, seg_len)
-                        if q_index < len(query) and score > best.score:
+                        if q_index < query_len and score > best.score:
                             rec.count("farrar.best_score_updates")
                             best = AlignmentResult(score, q_index + 1, reference_pos)
 
@@ -233,4 +232,55 @@ def run(
                     # F actually propagated past this iteration — real correction work.
                     rec.count("farrar.lazy_f_corrections")
 
-    return best
+        # Extract final corrected H values for this column into h_matrix.
+        # h_store holds fully corrected scores after the lazy-F pass above.
+        for segment in range(seg_len):
+            for lane, score in enumerate(h_store[segment]):
+                q_idx = striped_index_to_query_index(segment, lane, seg_len)
+                if q_idx < query_len:
+                    h_matrix[q_idx + 1][reference_pos] = score
+
+    return best, h_matrix
+
+
+def run_batch(
+    max_query_len: int,
+    max_reference_len: int,
+    match: int,
+    mismatch: int,
+    gap_open: int,
+    gap_extend: int,
+    queries: str,
+    references: str,
+    lanes: int = 8,
+    rec: Recorder | None = None,
+) -> tuple[list[AlignmentResult], list[list[list[int]]]]:
+    """Align a batch of packed query/reference pairs using Farrar's method.
+
+    queries and references are flat buffers where each sequence occupies a
+    fixed-width slot: sequence i lives at queries[i*max_query_len:(i+1)*max_query_len]
+    and references[i*max_reference_len:(i+1)*max_reference_len].
+
+    Returns (results, h_matrices).  Each h_matrix is (max_query_len+1) ×
+    (max_ref_len+1) with an explicit row 0 and col 0 of zeros representing the
+    DP boundary, so the zero padding is always visible in the output.
+    """
+    if max_query_len < 1 or max_reference_len < 1:
+        raise ValueError("max_query_len and max_reference_len must be >= 1")
+    if len(queries) % max_query_len != 0:
+        raise ValueError("len(queries) must be a multiple of max_query_len")
+    n = len(queries) // max_query_len
+    if len(references) != n * max_reference_len:
+        raise ValueError(
+            f"references length {len(references)} != {n} * max_reference_len {max_reference_len}"
+        )
+    _rec = rec if rec is not None else Recorder()
+    results: list[AlignmentResult] = []
+    h_matrices: list[list[list[int]]] = []
+    for i in range(n):
+        q = queries[i * max_query_len:(i + 1) * max_query_len]
+        r = references[i * max_reference_len:(i + 1) * max_reference_len]
+        result, h = _run_pair(q, r, match, mismatch, gap_open, gap_extend, lanes, _rec)
+        results.append(result)
+        h_matrices.append(h)
+    return results, h_matrices
