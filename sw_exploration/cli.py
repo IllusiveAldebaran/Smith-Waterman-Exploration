@@ -1,16 +1,17 @@
 """Command-line interface.
 
 All input sources produce a flat list of (query_name, query_seq, ref_name, ref_seq)
-pairs. Processing is always over the full list — a single inline sequence is a list
-of one pair, a FASTA file is a list of many. Sources may be freely combined.
+pairs. build_pairs() collects them; the chosen implementation then iterates over
+all pairs internally via its run() method.
 
-Visualisation (--preview / --heatmap) shows the actual H matrix per pair, with
+Visualisation (--preview / --heatmap) shows the H matrix per pair, with
 optional overlays for lazy-F trigger cells and min-score thresholds.
 """
 
 from __future__ import annotations
 
 import argparse
+import array
 import random
 from collections import Counter
 
@@ -27,12 +28,30 @@ from .output import (
     smith_waterman_time,
     write_output,
 )
-from .runner import run_one_pair
-from .sw_wrapper import SCORING_REGISTRY
+from .sw_wrapper import SCORING_REGISTRY, create_impl
+from .sw_implementations.scalar import ScalarImpl
 
 
-def random_sequence(length: int, alphabet: str, rng: random.Random) -> str:
-    return "".join(rng.choice(alphabet) for _ in range(length))
+def random_sequence(length: int, rng: random.Random) -> str:
+    return "".join(rng.choice("ACGTN") for _ in range(length))
+
+
+def parse_penalties(s: str) -> array.array:
+    """Parse MATCH,MISMATCH,DEL_OPEN,DEL_EXT,INS_OPEN,INS_EXT into an int8 array."""
+    parts = s.split(",")
+    if len(parts) != 6:
+        raise SystemExit(
+            "--penalties requires exactly 6 comma-separated integers: "
+            "MATCH,MISMATCH,DEL_OPEN,DEL_EXT,INS_OPEN,INS_EXT"
+        )
+    try:
+        values = [int(p) for p in parts]
+    except ValueError:
+        raise SystemExit("--penalties: all six values must be integers")
+    try:
+        return array.array('b', values)
+    except OverflowError:
+        raise SystemExit("--penalties: all values must fit in int8 (-128..127)")
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,20 +81,27 @@ def parse_args() -> argparse.Namespace:
                         help="length of each randomly generated query (default: 32)")
     parser.add_argument("--reference-length", type=int, default=32,
                         help="length of each randomly generated reference (default: 32)")
-    parser.add_argument("--alphabet", default="ACGT")
     parser.add_argument("--seed", type=int, default=0)
 
     # --- scoring ---
-    parser.add_argument("--match", type=int, default=2)
-    parser.add_argument("--mismatch", type=int, default=-1)
-    parser.add_argument("--gap-open", type=int, default=3)
-    parser.add_argument("--gap-extend", type=int, default=1)
+    parser.add_argument(
+        "--penalties", default="-2,1,3,1,3,1",
+        metavar="M,X,DO,DE,IO,IE",
+        help=(
+            "scoring penalties as six comma-separated int8 values: "
+            "MATCH,MISMATCH,DEL_OPEN,DEL_EXT,INS_OPEN,INS_EXT. "
+            "MATCH/MISMATCH are pre-negated: actual score delta is -MATCH on "
+            "a match, -MISMATCH on a mismatch "
+            "(default: -2,1,3,1,3,1 = +2 reward / -1 penalty)"
+        ),
+    )
     parser.add_argument(
         "--implementation", default="farrar",
         choices=sorted(SCORING_REGISTRY),
         help="scoring implementation (default: farrar)",
     )
-    parser.add_argument("--lanes", type=int, default=8)
+    parser.add_argument("--lanes", type=int, default=8,
+                        help="number of SIMD lanes for farrar/c_farrar (default: 8)")
 
     # --- output ---
     parser.add_argument(
@@ -137,8 +163,8 @@ def build_pairs(args: argparse.Namespace) -> list[tuple[str, str, str, str]]:
     if args.random_count is not None:
         rng = random.Random(args.seed)
         for i in range(args.random_count):
-            q = random_sequence(args.query_length, args.alphabet, rng)
-            r = random_sequence(args.reference_length, args.alphabet, rng)
+            q = random_sequence(args.query_length, rng)
+            r = random_sequence(args.reference_length, rng)
             pairs.append((f"query_{i}", q, f"reference_{i}", r))
 
     if not pairs:
@@ -153,7 +179,26 @@ def build_pairs(args: argparse.Namespace) -> list[tuple[str, str, str, str]]:
 def main() -> None:
     args = parse_args()
     pairs = build_pairs(args)
+    pen = parse_penalties(args.penalties)
 
+    # Run the chosen implementation over all pairs.
+    impl = create_impl(args.implementation, args)
+    impl.run(pairs, pen)
+
+    # Optionally run scalar DP for score validation (when chosen impl is not scalar).
+    scalar_impl = None
+    if args.validate_scalar and args.implementation != "scalar":
+        scalar_impl = ScalarImpl(verbose=args.verbose)
+        scalar_impl.run(pairs, pen)
+
+    summary_only = args.summary and not args.show_matrix
+    need_matrix_display = (
+        args.show_matrix
+        or (args.preview and not summary_only)
+        or (bool(args.heatmap) and not summary_only)
+    )
+
+    # Build per-pair output data.
     pairs_data: list[dict] = []
     total_times: Counter[str] = Counter()
     total_counts: Counter[str] = Counter()
@@ -162,15 +207,25 @@ def main() -> None:
         if args.progress:
             print(f"pair {index + 1}/{len(pairs)}: {query_name} x {ref_name}", flush=True)
 
-        result, mismatch, counts, times, events, matrix, cell_events = run_one_pair(
-            query_seq, ref_seq, args, args.validate_scalar
-        )
+        result = impl.results[index]
+        pair_rec = impl.pair_recs[index]
 
-        lazy_f = counts.get("farrar.lazy_f_corrections", 0)
-        total_times.update(times)
-        total_counts.update(counts)
+        # Use the chosen impl's h_matrix for display; fall back to scalar's when validating.
+        h_matrix: list[list[int]] | None = None
+        if need_matrix_display:
+            if hasattr(impl, 'h_matrices') and impl.h_matrices[index] is not None:
+                h_matrix = impl.h_matrices[index]
+            elif scalar_impl is not None:
+                h_matrix = scalar_impl.h_matrices[index]
 
-        lazy_f_triggers = cell_events.get("farrar.lazy_f_trigger", [])
+        lazy_f = pair_rec.counts.get("farrar.lazy_f_corrections", 0)
+        lazy_f_triggers = pair_rec.cell_events.get("farrar.lazy_f_trigger", [])
+        total_times.update(pair_rec.times)
+        total_counts.update(pair_rec.counts)
+
+        score_mismatch = False
+        if scalar_impl is not None:
+            score_mismatch = scalar_impl.results[index].score != result.score
 
         pairs_data.append(
             {
@@ -186,10 +241,10 @@ def main() -> None:
                 "end_reference": result.end_reference,
                 "lazy_f_corrections": lazy_f,
                 "lazy_f_triggers": lazy_f_triggers,
-                "score_mismatch": int(mismatch),
-                "smith_waterman_time_s": smith_waterman_time(times),
-                "farrar_time_s": farrar_time(times),
-                "h_matrix": matrix,
+                "score_mismatch": int(score_mismatch),
+                "smith_waterman_time_s": smith_waterman_time(pair_rec.times),
+                "farrar_time_s": farrar_time(pair_rec.times),
+                "h_matrix": h_matrix,
             }
         )
 
@@ -201,19 +256,19 @@ def main() -> None:
                 f"  lazy_f_triggers={len(lazy_f_triggers)}"
             )
 
-        if args.show_matrix and matrix is not None:
+        if args.show_matrix and h_matrix is not None:
             print(f"\nH matrix for {query_name} x {ref_name}:")
-            print(format_matrix(matrix, query_seq, ref_seq))
+            print(format_matrix(h_matrix, query_seq, ref_seq))
 
         if args.verbose >= 1:
             label = "full events" if args.verbose >= 2 else "stage events"
             print(f"\n{label} for {query_name} x {ref_name}:")
-            for event in events:
+            for event in pair_rec.events:
                 print(f"  {event}")
 
     if not args.no_results:
         output_path = next_output_path(args.output)
-        write_output(output_path, pairs_data, args)
+        write_output(output_path, pairs_data, pen, args)
 
     total_lazy_f = sum(p["lazy_f_corrections"] for p in pairs_data)
     total_triggers = sum(len(p["lazy_f_triggers"]) for p in pairs_data)
@@ -239,7 +294,7 @@ def main() -> None:
         else:
             vis_pairs = [p for p in pairs_data if p["h_matrix"] is not None]
             if not vis_pairs:
-                print("warning: no H matrices available for visualisation (matrices are computed automatically with --preview/--heatmap)")
+                print("warning: no H matrices available for visualisation")
                 vis_pairs = None
             if vis_pairs:
                 fig = build_matrix_figure(

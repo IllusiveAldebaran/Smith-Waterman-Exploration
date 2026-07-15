@@ -1,24 +1,19 @@
-"""Scalar affine-gap Smith-Waterman local alignment.
+"""C-backed scalar Smith-Waterman via cffi (compiled from scalar.c / swag.h).
 
-Fills three DP matrices (H, E, F) and a pointer matrix for traceback.
-This is the reference implementation: correct, readable, and slow. Every
-major step is counted and timed via a Recorder so callers can compare
-operation counts against faster implementations.
-
-Canonical scoring signature (used by sw_wrapper.SCORING_REGISTRY):
-  run(query, reference, match, mismatch, gap_open, gap_extend, lanes, rec)
-      -> AlignmentResult
-The `lanes` parameter is accepted but unused; it exists so all registered
-implementations share the same call signature.
+pen layout: array.array('b', [match, mismatch, del_open, del_ext, ins_open, ins_ext])
+match/mismatch are pre-negated; all six values are passed directly through
+as the penalties[6] array.
 """
 
 from __future__ import annotations
+
+import array
 import os
-
-from ..types import AlignmentResult, Recorder, TracebackResult, NEG_INF
-
 import sys
+
 from cffi import FFI
+
+from ..types import AlgorithmImplementation, AlignmentResult, Recorder
 
 _here = os.path.dirname(os.path.abspath(__file__))
 
@@ -63,197 +58,54 @@ _lib = _swag_ffi.lib
 _ffi = _swag_ffi.ffi
 
 
-def score_pair(a: str, b: str, match: int, mismatch: int) -> int:
-    """Return match score if residues are identical, mismatch score otherwise."""
-    return match if a == b else mismatch
+def _align_one(qseq: str, rseq: str, pen: array.array, rec: Recorder) -> tuple[AlignmentResult, list[list[int]]]:
+    """Align one pair via the C kernel. Returns (result, h_matrix)."""
+    ref_len_c = len(rseq) + 1
+    qry_len_c = len(qseq) + 1
+    ref_bytes = b'\x00' + rseq.encode('ascii')
+    qry_bytes = b'\x00' + qseq.encode('ascii')
+
+    penalties = _ffi.new("int8_t[6]", list(pen))
+    H_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c)
+
+    with rec.timed("c_scalar.dp_fill"):
+        _lib.alignOne(ref_len_c, qry_len_c, penalties, ref_bytes, qry_bytes, H_buf)
+
+    h = [
+        [int(H_buf[j * ref_len_c + k]) for k in range(ref_len_c)]
+        for j in range(qry_len_c)
+    ]
+
+    best_score = 0
+    best_j = best_k = 0
+    for j in range(1, qry_len_c):
+        for k in range(1, ref_len_c):
+            if h[j][k] > best_score:
+                best_score = h[j][k]
+                best_j, best_k = j, k
+
+    return AlignmentResult(best_score, best_j, best_k), h
 
 
-def smith_waterman_dp(
-    query: str,
-    reference: str,
-    match: int,
-    mismatch: int,
-    gap_open: int,
-    gap_extend: int,
-    rec: Recorder,
-) -> tuple[AlignmentResult, list[list[int]], list[list[str]]]:
-    """Fill the scalar Smith-Waterman affine-gap DP matrices.
+class CScalarImpl(AlgorithmImplementation):
+    """C-backed scalar Smith-Waterman implementation."""
 
-    H is the best local score ending at each cell.
-    E is the best score ending with a horizontal gap.
-    F is the best score ending with a vertical gap.
-    ptr records the selected predecessor for traceback.
+    def __init__(self, verbose: int = 0) -> None:
+        self.verbose = verbose
+        self.rec = Recorder(verbose=verbose)
+        self.results: list[AlignmentResult] = []
+        self.h_matrices: list[list[list[int]]] = []
+        self.pair_recs: list[Recorder] = []
 
-    Returns (best_result, H_matrix, ptr_matrix) so the caller can run
-    traceback_alignment if the full alignment path is needed.
-    """
-    rec.count("smith_waterman.invocations")
-    with rec.timed("smith_waterman.dp_fill"):
-        m = len(query)
-        n = len(reference)
-        h = [[0] * (n + 1) for _ in range(m + 1)]
-        e = [[NEG_INF] * (n + 1) for _ in range(m + 1)]
-        f = [[NEG_INF] * (n + 1) for _ in range(m + 1)]
-        ptr = [["stop"] * (n + 1) for _ in range(m + 1)]
-
-        best = AlignmentResult(0, 0, 0)
-        for i in range(1, m + 1):
-            rec.count("smith_waterman.dp_rows")
-            for j in range(1, n + 1):
-                rec.count("smith_waterman.dp_cells")
-                rec.count("smith_waterman.substitution_scores")
-
-                rec.count("smith_waterman.gap_e_updates")
-                e[i][j] = max(h[i][j - 1] - gap_open, e[i][j - 1] - gap_extend)
-
-                rec.count("smith_waterman.gap_f_updates")
-                f[i][j] = max(h[i - 1][j] - gap_open, f[i - 1][j] - gap_extend)
-
-                rec.count("smith_waterman.diagonal_updates")
-                diag = h[i - 1][j - 1] + score_pair(
-                    query[i - 1], reference[j - 1], match, mismatch
-                )
-
-                rec.count("smith_waterman.cell_max_reductions")
-                h[i][j] = max(0, diag, e[i][j], f[i][j])
-
-                if h[i][j] == 0:
-                    ptr[i][j] = "stop"
-                elif h[i][j] == diag:
-                    ptr[i][j] = "diag"
-                elif h[i][j] == e[i][j]:
-                    ptr[i][j] = "left"
-                else:
-                    ptr[i][j] = "up"
-
-                if h[i][j] > best.score:
-                    rec.count("smith_waterman.best_score_updates")
-                    best = AlignmentResult(h[i][j], i, j)
-
-    return best, h, ptr
-
-
-def traceback_alignment(
-    query: str,
-    reference: str,
-    h: list[list[int]],
-    ptr: list[list[str]],
-    end: AlignmentResult,
-    rec: Recorder,
-) -> TracebackResult:
-    """Backtrack from the best local-alignment cell to the zero boundary."""
-    with rec.timed("smith_waterman.traceback"):
-        i = end.end_query
-        j = end.end_reference
-        aligned_query = []
-        aligned_reference = []
-        path = []
-
-        while i > 0 and j > 0 and h[i][j] > 0:
-            direction = ptr[i][j]
-            rec.count("smith_waterman.backtrack_steps")
-            rec.count(f"smith_waterman.backtrack_{direction}")
-            path.append(direction)
-
-            if direction == "diag":
-                aligned_query.append(query[i - 1])
-                aligned_reference.append(reference[j - 1])
-                i -= 1
-                j -= 1
-            elif direction == "left":
-                aligned_query.append("-")
-                aligned_reference.append(reference[j - 1])
-                j -= 1
-            elif direction == "up":
-                aligned_query.append(query[i - 1])
-                aligned_reference.append("-")
-                i -= 1
-            else:
-                break
-
-        rec.count("smith_waterman.backtrack_stop")
-
-    return TracebackResult(
-        start_query=i + 1,
-        start_reference=j + 1,
-        aligned_query="".join(reversed(aligned_query)),
-        aligned_reference="".join(reversed(aligned_reference)),
-        path=tuple(reversed(path)),
-    )
-
-
-def run_batch(
-    max_query_len: int,
-    max_reference_len: int,
-    match: int,
-    mismatch: int,
-    gap_open: int,
-    gap_extend: int,
-    queries: str,
-    references: str,
-    lanes: int = 8,  # unused; present for uniform signature across implementations
-    rec: Recorder | None = None,
-) -> tuple[list[AlignmentResult], list[list[list[int]]]]:
-    """Align a batch of packed query/reference pairs.
-
-    queries and references are flat buffers where each sequence occupies a
-    fixed-width slot: sequence i lives at queries[i*max_query_len:(i+1)*max_query_len]
-    and references[i*max_reference_len:(i+1)*max_reference_len].
-
-    Returns (results, h_matrices).  Each h_matrix is (max_query_len+1) ×
-    (max_ref_len+1) with an explicit row 0 and col 0 of zeros representing the
-    DP boundary, so the zero padding is always visible in the output.
-    """
-    if max_query_len < 1 or max_reference_len < 1:
-        raise ValueError("max_query_len and max_reference_len must be >= 1")
-    if len(queries) % max_query_len != 0:
-        raise ValueError("len(queries) must be a multiple of max_query_len")
-    n = len(queries) // max_query_len
-    if len(references) != n * max_reference_len:
-        raise ValueError(
-            f"references length {len(references)} != {n} * max_reference_len {max_reference_len}"
-        )
-    _rec = rec if rec is not None else Recorder()
-    # Penalties array for C: all six values must fit in int8_t (-128..127).
-    # Note the C kernel negates them internally: score = -penMatch for a match,
-    # so pass negative match/mismatch rewards and positive gap penalties.
-    penalties = _ffi.new("int8_t[6]", [match, mismatch, gap_open, gap_extend, gap_open, gap_extend])
-
-    results: list[AlignmentResult] = []
-    h_matrices: list[list[list[int]]] = []
-    for i in range(n):
-        q = queries[i * max_query_len:(i + 1) * max_query_len]
-        r = references[i * max_reference_len:(i + 1) * max_reference_len]
-
-        # C kernel uses 1-based indexing: loop runs i=1..refLen-1, j=1..qryLen-1.
-        # Pass len+1 and prepend a dummy byte so sequence[1..len] are the residues.
-        ref_len_c = len(r) + 1
-        qry_len_c = len(q) + 1
-        ref_bytes = b'\x00' + r.encode('ascii')
-        qry_bytes = b'\x00' + q.encode('ascii')
-
-        # H is qry_len_c × ref_len_c, row-major (query outer, ref inner), zero-init.
-        H_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c)
-
-        with _rec.timed("c_scalar.dp_fill"):
-            _lib.alignOne(ref_len_c, qry_len_c, penalties, ref_bytes, qry_bytes, H_buf)
-
-        # Materialise as Python list-of-lists matching scalar.py convention:
-        # h[query_pos][ref_pos], both 1-indexed (row 0 and col 0 are boundary zeros).
-        h = [
-            [int(H_buf[j * ref_len_c + k]) for k in range(ref_len_c)]
-            for j in range(qry_len_c)
-        ]
-
-        # Locate best score and its (query, ref) position.
-        best_score = 0
-        best_j = best_k = 0
-        for j in range(1, qry_len_c):
-            for k in range(1, ref_len_c):
-                if h[j][k] > best_score:
-                    best_score = h[j][k]
-                    best_j, best_k = j, k
-
-        results.append(AlignmentResult(best_score, best_j, best_k))
-        h_matrices.append(h)
-    return results, h_matrices
+    def run(self, pairs: list[tuple[str, str, str, str]], pen: array.array) -> None:
+        for _qname, qseq, _rname, rseq in pairs:
+            pair_rec = Recorder(verbose=self.verbose)
+            result, h = _align_one(qseq, rseq, pen, pair_rec)
+            self.results.append(result)
+            self.h_matrices.append(h)
+            self.pair_recs.append(pair_rec)
+            self.rec.counts.update(pair_rec.counts)
+            self.rec.times.update(pair_rec.times)
+            self.rec.events.extend(pair_rec.events)
+            for k, v in pair_rec.cell_events.items():
+                self.rec.cell_events.setdefault(k, []).extend(v)

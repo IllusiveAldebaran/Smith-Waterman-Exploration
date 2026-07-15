@@ -5,42 +5,41 @@ This is the reference implementation: correct, readable, and slow. Every
 major step is counted and timed via a Recorder so callers can compare
 operation counts against faster implementations.
 
-Canonical scoring signature (used by sw_wrapper.SCORING_REGISTRY):
-  run(query, reference, match, mismatch, gap_open, gap_extend, lanes, rec)
-      -> AlignmentResult
-The `lanes` parameter is accepted but unused; it exists so all registered
-implementations share the same call signature.
+pen layout: array.array('b', [match, mismatch, del_open, del_ext, ins_open, ins_ext])
+  del_open/del_ext apply to E (horizontal gaps).
+  ins_open/ins_ext apply to F (vertical gaps).
+  match/mismatch are pre-negated: the actual score contribution is -match on
+  a match and -mismatch on a mismatch (default -2,1 for a +2 reward / -1 penalty).
 """
 
 from __future__ import annotations
 
-from ..types import AlignmentResult, Recorder, TracebackResult, NEG_INF
+import array
+
+from ..types import AlgorithmImplementation, AlignmentResult, Recorder, TracebackResult, NEG_INF
 
 
 def score_pair(a: str, b: str, match: int, mismatch: int) -> int:
-    """Return match score if residues are identical, mismatch score otherwise."""
-    return match if a == b else mismatch
+    """Return match/mismatch score. match/mismatch are pre-negated; negate back here."""
+    return -match if a == b else -mismatch
 
 
 def smith_waterman_dp(
     query: str,
     reference: str,
-    match: int,
-    mismatch: int,
-    gap_open: int,
-    gap_extend: int,
+    pen: array.array,
     rec: Recorder,
 ) -> tuple[AlignmentResult, list[list[int]], list[list[str]]]:
     """Fill the scalar Smith-Waterman affine-gap DP matrices.
 
     H is the best local score ending at each cell.
-    E is the best score ending with a horizontal gap.
-    F is the best score ending with a vertical gap.
+    E is the best score ending with a horizontal gap (del_open/del_ext).
+    F is the best score ending with a vertical gap (ins_open/ins_ext).
     ptr records the selected predecessor for traceback.
 
-    Returns (best_result, H_matrix, ptr_matrix) so the caller can run
-    traceback_alignment if the full alignment path is needed.
+    Returns (best_result, H_matrix, ptr_matrix).
     """
+    match, mismatch, del_open, del_ext, ins_open, ins_ext = pen
     rec.count("smith_waterman.invocations")
     with rec.timed("smith_waterman.dp_fill"):
         m = len(query)
@@ -58,10 +57,10 @@ def smith_waterman_dp(
                 rec.count("smith_waterman.substitution_scores")
 
                 rec.count("smith_waterman.gap_e_updates")
-                e[i][j] = max(h[i][j - 1] - gap_open, e[i][j - 1] - gap_extend)
+                e[i][j] = max(h[i][j - 1] - del_open, e[i][j - 1] - del_ext)
 
                 rec.count("smith_waterman.gap_f_updates")
-                f[i][j] = max(h[i - 1][j] - gap_open, f[i - 1][j] - gap_extend)
+                f[i][j] = max(h[i - 1][j] - ins_open, f[i - 1][j] - ins_ext)
 
                 rec.count("smith_waterman.diagonal_updates")
                 diag = h[i - 1][j - 1] + score_pair(
@@ -136,44 +135,26 @@ def traceback_alignment(
     )
 
 
-def run_batch(
-    max_query_len: int,
-    max_reference_len: int,
-    match: int,
-    mismatch: int,
-    gap_open: int,
-    gap_extend: int,
-    queries: str,
-    references: str,
-    lanes: int = 8,  # unused; present for uniform signature across implementations
-    rec: Recorder | None = None,
-) -> tuple[list[AlignmentResult], list[list[list[int]]]]:
-    """Align a batch of packed query/reference pairs.
+class ScalarImpl(AlgorithmImplementation):
+    """Reference scalar affine-gap Smith-Waterman implementation."""
 
-    queries and references are flat buffers where each sequence occupies a
-    fixed-width slot: sequence i lives at queries[i*max_query_len:(i+1)*max_query_len]
-    and references[i*max_reference_len:(i+1)*max_reference_len].
+    def __init__(self, verbose: int = 0) -> None:
+        self.verbose = verbose
+        self.rec = Recorder(verbose=verbose)
+        self.results: list[AlignmentResult] = []
+        self.h_matrices: list[list[list[int]]] = []
+        self.pair_recs: list[Recorder] = []
 
-    Returns (results, h_matrices).  Each h_matrix is (max_query_len+1) ×
-    (max_ref_len+1) with an explicit row 0 and col 0 of zeros representing the
-    DP boundary, so the zero padding is always visible in the output.
-    """
-    if max_query_len < 1 or max_reference_len < 1:
-        raise ValueError("max_query_len and max_reference_len must be >= 1")
-    if len(queries) % max_query_len != 0:
-        raise ValueError("len(queries) must be a multiple of max_query_len")
-    n = len(queries) // max_query_len
-    if len(references) != n * max_reference_len:
-        raise ValueError(
-            f"references length {len(references)} != {n} * max_reference_len {max_reference_len}"
-        )
-    _rec = rec if rec is not None else Recorder()
-    results: list[AlignmentResult] = []
-    h_matrices: list[list[list[int]]] = []
-    for i in range(n):
-        q = queries[i * max_query_len:(i + 1) * max_query_len]
-        r = references[i * max_reference_len:(i + 1) * max_reference_len]
-        result, h, _ = smith_waterman_dp(q, r, match, mismatch, gap_open, gap_extend, _rec)
-        results.append(result)
-        h_matrices.append(h)
-    return results, h_matrices
+    def run(self, pairs: list[tuple[str, str, str, str]], pen: array.array) -> None:
+        for _qname, qseq, _rname, rseq in pairs:
+            pair_rec = Recorder(verbose=self.verbose)
+            result, h, ptr = smith_waterman_dp(qseq, rseq, pen, pair_rec)
+            traceback_alignment(qseq, rseq, h, ptr, result, pair_rec)
+            self.results.append(result)
+            self.h_matrices.append(h)
+            self.pair_recs.append(pair_rec)
+            self.rec.counts.update(pair_rec.counts)
+            self.rec.times.update(pair_rec.times)
+            self.rec.events.extend(pair_rec.events)
+            for k, v in pair_rec.cell_events.items():
+                self.rec.cell_events.setdefault(k, []).extend(v)

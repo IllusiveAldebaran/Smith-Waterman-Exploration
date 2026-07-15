@@ -5,10 +5,16 @@ traceback passes. Recorder collects named occurrence counts, stage timings,
 and per-cell events so callers can answer questions like "how many DP cells
 were filled?", "how much time was spent in the lazy-F correction?", and
 "which alignment cells triggered lazy-F propagation?".
+
+AlgorithmImplementation is the abstract base class for all scoring
+implementations. Each concrete class owns its Recorder, iterates over all
+pairs in run(), and stores one AlignmentResult per pair in self.results.
 """
 
 from __future__ import annotations
 
+import array
+from abc import ABC, abstractmethod
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -17,6 +23,7 @@ from time import perf_counter
 NEG_INF = -(10**9)
 
 
+# Marks the location of the best score in grid
 @dataclass(frozen=True)
 class AlignmentResult:
     score: int
@@ -71,3 +78,35 @@ class Recorder:
             self.times[name] += elapsed
             if self.verbose >= 1:
                 self.events.append(f"end {name}: {elapsed:.9f}s")
+
+
+class AlgorithmImplementation(ABC):
+    """Abstract base for all Smith-Waterman implementations.
+
+    Subclasses own their Recorder and iterate over all pairs in run().
+    After run() returns:
+      self.results[i]    — AlignmentResult for pairs[i]
+      self.h_matrices[i] — H matrix for pairs[i] (or None if unavailable)
+      self.pair_recs[i]  — per-pair Recorder for pairs[i]
+      self.rec           — aggregate Recorder across all pairs
+    """
+
+    rec: Recorder
+    results: list[AlignmentResult]
+    h_matrices: list
+    pair_recs: list[Recorder]
+
+    @abstractmethod
+    def __init__(self, verbose: int = 0) -> None: ...
+
+    @abstractmethod
+    def run(
+        self,
+        pairs: list[tuple[str, str, str, str]],
+        pen: array.array,
+    ) -> None:
+        """Align all pairs and store results.
+
+        pairs: list of (query_name, query_seq, ref_name, ref_seq)
+        pen:   array.array('b', [match, mismatch, del_open, del_ext, ins_open, ins_ext])
+        """

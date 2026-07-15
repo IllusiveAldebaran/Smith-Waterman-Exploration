@@ -8,20 +8,22 @@ Three conceptual stages are recorded separately:
   3. Lazy-F correction    – propagates vertical-gap scores across lane boundaries
                             until no further correction is needed.
 
-The Python simulation uses plain lists instead of SIMD intrinsics; counts and
-timings come from the same Recorder used by the scalar DP, enabling direct
-comparison of operation counts between the two implementations.
+pen layout: array.array('b', [match, mismatch, del_open, del_ext, ins_open, ins_ext])
+  del_open/del_ext apply to E (horizontal gaps).
+  ins_open/ins_ext apply to F (vertical gaps).
+  match/mismatch are pre-negated; score_pair() in scalar.py negates them back
+  to an actual score delta.
 
-The module-level `run` function is the canonical entry point for
-sw_wrapper.SCORING_REGISTRY dispatch.
+FarrarImpl is the registry entry point. lanes is set at construction time.
 """
 
 from __future__ import annotations
 
+import array
 from math import ceil
 
 from .scalar import score_pair
-from ..types import AlignmentResult, Recorder, NEG_INF
+from ..types import AlgorithmImplementation, AlignmentResult, Recorder, NEG_INF
 
 
 def striped_index_to_query_index(segment: int, lane: int, seg_len: int) -> int:
@@ -31,7 +33,7 @@ def striped_index_to_query_index(segment: int, lane: int, seg_len: int) -> int:
 
 def make_query_profile(
     query: str,
-    alphabet: list[str],
+    reference: str,
     lanes: int,
     match: int,
     mismatch: int,
@@ -47,7 +49,7 @@ def make_query_profile(
         seg_len = ceil(len(query) / lanes)
         profile: dict[str, list[list[int]]] = {}
 
-        for ch in alphabet:
+        for ch in sorted(set(reference)):
             rec.count("farrar.profile_symbols")
             vectors = []
             for segment in range(seg_len):
@@ -102,19 +104,16 @@ def shift_one_lane(v: list[int], insert: int, rec: Recorder, label: str) -> list
 def _run_pair(
     query: str,
     reference: str,
-    match: int,
-    mismatch: int,
-    gap_open: int,
-    gap_extend: int,
+    pen: array.array,
     lanes: int,
     rec: Recorder,
 ) -> tuple[AlignmentResult, list[list[int]]]:
     """Align one pair using Farrar's striped method.
 
     Returns (best_result, h_matrix) where h_matrix is (query_len+1) × (ref_len+1)
-    with row 0 and col 0 as zeros (the DP boundary).  The matrix is reconstructed
-    from h_store after each column's lazy-F pass so the values are fully corrected.
+    with row 0 and col 0 as zeros (the DP boundary).
     """
+    match, mismatch, del_open, del_ext, ins_open, ins_ext = pen
     rec.count("farrar.invocations")
     if lanes < 1:
         raise ValueError("lanes must be >= 1")
@@ -126,8 +125,7 @@ def _run_pair(
     if not query or not reference:
         return AlignmentResult(0, 0, 0), h_matrix
 
-    alphabet = sorted(set(query) | set(reference))
-    profile, seg_len = make_query_profile(query, alphabet, lanes, match, mismatch, rec)
+    profile, seg_len = make_query_profile(query, reference, lanes, match, mismatch, rec)
     zero = [0] * lanes
     neg = [NEG_INF] * lanes
     h_store = [zero[:] for _ in range(seg_len)]
@@ -167,16 +165,18 @@ def _run_pair(
                         rec.count("farrar.best_score_updates")
                         best = AlignmentResult(score, q_index + 1, reference_pos)
 
-                h_gap = vector_sub_scalar(h, gap_open, rec, "farrar.main.h_gap")
+                h_del_gap = vector_sub_scalar(h, del_open, rec, "farrar.main.h_del_gap")
+                h_ins_gap = vector_sub_scalar(h, ins_open, rec, "farrar.main.h_ins_gap")
+
                 e_ext = vector_sub_scalar(
-                    e_store[segment], gap_extend, rec, "farrar.main.e_ext"
+                    e_store[segment], del_ext, rec, "farrar.main.e_ext"
                 )
                 e_store[segment] = vector_max(
-                    e_ext, h_gap, rec, "farrar.main.max_e"
+                    e_ext, h_del_gap, rec, "farrar.main.max_e"
                 )
 
-                f_ext = vector_sub_scalar(f, gap_extend, rec, "farrar.main.f_ext")
-                f = vector_max(f_ext, h_gap, rec, "farrar.main.max_f")
+                f_ext = vector_sub_scalar(f, ins_ext, rec, "farrar.main.f_ext")
+                f = vector_max(f_ext, h_ins_gap, rec, "farrar.main.max_f")
 
                 # The next segment's diagonal dependency comes from the
                 # stored H value from the previous reference column.
@@ -212,16 +212,16 @@ def _run_pair(
                             rec.count("farrar.best_score_updates")
                             best = AlignmentResult(score, q_index + 1, reference_pos)
 
-                    h_gap = vector_sub_scalar(
-                        corrected, gap_open, rec, "farrar.lazy_f.h_gap"
+                    h_ins_gap = vector_sub_scalar(
+                        corrected, ins_open, rec, "farrar.lazy_f.h_ins_gap"
                     )
-                    f = vector_sub_scalar(f, gap_extend, rec, "farrar.lazy_f.f_ext")
+                    f = vector_sub_scalar(f, ins_ext, rec, "farrar.lazy_f.f_ext")
 
                     rec.count("farrar.lazy_f_stop_tests")
                     rec.count("farrar.lazy_f_stop_test_lanes", lanes)
                     if any(
-                        f_lane > h_gap_lane
-                        for f_lane, h_gap_lane in zip(f, h_gap)
+                        f_lane > h_ins_gap_lane
+                        for f_lane, h_ins_gap_lane in zip(f, h_ins_gap)
                     ):
                         stop = False
 
@@ -233,7 +233,6 @@ def _run_pair(
                     rec.count("farrar.lazy_f_corrections")
 
         # Extract final corrected H values for this column into h_matrix.
-        # h_store holds fully corrected scores after the lazy-F pass above.
         for segment in range(seg_len):
             for lane, score in enumerate(h_store[segment]):
                 q_idx = striped_index_to_query_index(segment, lane, seg_len)
@@ -243,44 +242,26 @@ def _run_pair(
     return best, h_matrix
 
 
-def run_batch(
-    max_query_len: int,
-    max_reference_len: int,
-    match: int,
-    mismatch: int,
-    gap_open: int,
-    gap_extend: int,
-    queries: str,
-    references: str,
-    lanes: int = 8,
-    rec: Recorder | None = None,
-) -> tuple[list[AlignmentResult], list[list[list[int]]]]:
-    """Align a batch of packed query/reference pairs using Farrar's method.
+class FarrarImpl(AlgorithmImplementation):
+    """Farrar's striped Smith-Waterman implementation. lanes is set at construction."""
 
-    queries and references are flat buffers where each sequence occupies a
-    fixed-width slot: sequence i lives at queries[i*max_query_len:(i+1)*max_query_len]
-    and references[i*max_reference_len:(i+1)*max_reference_len].
+    def __init__(self, lanes: int = 8, verbose: int = 0) -> None:
+        self.lanes = lanes
+        self.verbose = verbose
+        self.rec = Recorder(verbose=verbose)
+        self.results: list[AlignmentResult] = []
+        self.h_matrices: list[list[list[int]]] = []
+        self.pair_recs: list[Recorder] = []
 
-    Returns (results, h_matrices).  Each h_matrix is (max_query_len+1) ×
-    (max_ref_len+1) with an explicit row 0 and col 0 of zeros representing the
-    DP boundary, so the zero padding is always visible in the output.
-    """
-    if max_query_len < 1 or max_reference_len < 1:
-        raise ValueError("max_query_len and max_reference_len must be >= 1")
-    if len(queries) % max_query_len != 0:
-        raise ValueError("len(queries) must be a multiple of max_query_len")
-    n = len(queries) // max_query_len
-    if len(references) != n * max_reference_len:
-        raise ValueError(
-            f"references length {len(references)} != {n} * max_reference_len {max_reference_len}"
-        )
-    _rec = rec if rec is not None else Recorder()
-    results: list[AlignmentResult] = []
-    h_matrices: list[list[list[int]]] = []
-    for i in range(n):
-        q = queries[i * max_query_len:(i + 1) * max_query_len]
-        r = references[i * max_reference_len:(i + 1) * max_reference_len]
-        result, h = _run_pair(q, r, match, mismatch, gap_open, gap_extend, lanes, _rec)
-        results.append(result)
-        h_matrices.append(h)
-    return results, h_matrices
+    def run(self, pairs: list[tuple[str, str, str, str]], pen: array.array) -> None:
+        for _qname, qseq, _rname, rseq in pairs:
+            pair_rec = Recorder(verbose=self.verbose)
+            result, h = _run_pair(qseq, rseq, pen, self.lanes, pair_rec)
+            self.results.append(result)
+            self.h_matrices.append(h)
+            self.pair_recs.append(pair_rec)
+            self.rec.counts.update(pair_rec.counts)
+            self.rec.times.update(pair_rec.times)
+            self.rec.events.extend(pair_rec.events)
+            for k, v in pair_rec.cell_events.items():
+                self.rec.cell_events.setdefault(k, []).extend(v)

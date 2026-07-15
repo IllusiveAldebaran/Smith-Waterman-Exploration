@@ -287,14 +287,19 @@ def build_summary_figure(pairs: list[dict]):
 # File output
 # ---------------------------------------------------------------------------
 
-def write_output(path: str, pairs_data: list[dict], args: object) -> None:
+def write_output(path: str, pairs_data: list[dict], pen, args: object) -> None:
     """Write alignment results to path as JSON."""
+    pen_list = list(pen)
     meta = {
         "implementation": getattr(args, "implementation", "farrar"),
-        "match": getattr(args, "match", 2),
-        "mismatch": getattr(args, "mismatch", -1),
-        "gap_open": getattr(args, "gap_open", 3),
-        "gap_extend": getattr(args, "gap_extend", 1),
+        "penalties": {
+            "match":    pen_list[0],
+            "mismatch": pen_list[1],
+            "del_open": pen_list[2],
+            "del_ext":  pen_list[3],
+            "ins_open": pen_list[4],
+            "ins_ext":  pen_list[5],
+        },
         "lanes": getattr(args, "lanes", 8),
     }
     pairs_out = []

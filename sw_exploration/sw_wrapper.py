@@ -1,82 +1,57 @@
 """Runtime dispatch wrapper for Smith-Waterman implementations.
 
-All concrete implementations live in sw_implementations/ and expose only
-run_batch().  This module imports them, registers them in SCORING_REGISTRY,
-and exposes run_scoring() for name-based single-pair dispatch (used by
-runner.py).  It also re-exports the scalar DP helpers needed for matrix
-display and traceback.
+All concrete implementations live in sw_implementations/ and expose a class
+that subclasses AlgorithmImplementation.  This module imports them, registers
+them in SCORING_REGISTRY, and exposes create_impl() for CLI instantiation.
 
 Adding a new implementation
 ---------------------------
-1. Create sw_implementations/myimpl.py with:
-
-     def run_batch(
-         max_query_len, max_reference_len,
-         match, mismatch, gap_open, gap_extend,
-         queries, references,
-         lanes=8, rec=None,
-     ) -> tuple[list[AlignmentResult], list[list[list[int]] | None]]:
-         ...
-
+1. Create sw_implementations/myimpl.py with a class MyImpl(AlgorithmImplementation).
 2. Register it here:
 
      from .sw_implementations import myimpl
-     SCORING_REGISTRY["myimpl"] = myimpl.run_batch
+     SCORING_REGISTRY["myimpl"] = myimpl.MyImpl
 
-That is all. The CLI --implementation flag selects from SCORING_REGISTRY at
-runtime.
+That is all. The CLI --implementation flag selects from SCORING_REGISTRY at runtime.
 """
 
 from __future__ import annotations
 
+import argparse
+
 from .sw_implementations import c_farrar, c_scalar, farrar, scalar
-from .sw_implementations.scalar import smith_waterman_dp, traceback_alignment
-from .types import AlignmentResult, Recorder
+from .types import AlgorithmImplementation
 
 # ---------------------------------------------------------------------------
-# Registry — maps implementation name to its run_batch function.
-# Each entry must accept:
-#   (max_query_len, max_ref_len, match, mismatch, gap_open, gap_extend,
-#    queries, references, lanes=8, rec=None)
-# and return (list[AlignmentResult], list[h_matrix | None]).
+# Registry — maps implementation name to its class.
+# Each class must subclass AlgorithmImplementation and accept at minimum
+# verbose=0 in its constructor. Implementation-specific params (e.g. lanes)
+# are also accepted by the classes that need them.
 # ---------------------------------------------------------------------------
-SCORING_REGISTRY: dict[str, object] = {
-    "scalar":   scalar.run_batch,
-    "farrar":   farrar.run_batch,
-    "c_scalar": c_scalar.run_batch,
-    "c_farrar": c_farrar.run_batch,
+SCORING_REGISTRY: dict[str, type[AlgorithmImplementation]] = {
+    "scalar":   scalar.ScalarImpl,
+    "farrar":   farrar.FarrarImpl,
+    "c_scalar": c_scalar.CScalarImpl,
+    "c_farrar": c_farrar.CFarrarImpl,
 }
 
+# Implementations that accept a lanes parameter at construction.
+_LANES_IMPLS = {"farrar", "c_farrar"}
 
-def run_scoring(
-    name: str,
-    query: str,
-    reference: str,
-    match: int,
-    mismatch: int,
-    gap_open: int,
-    gap_extend: int,
-    lanes: int,
-    rec: Recorder,
-) -> AlignmentResult:
-    """Dispatch a single pair to a named implementation via run_batch.
 
-    Packages the pair as a batch of 1 and returns results[0].  The H matrix
-    from run_batch is discarded here; the display matrix comes from
-    smith_waterman_dp in runner.py when need_matrix is True.
+def create_impl(name: str, args: argparse.Namespace) -> AlgorithmImplementation:
+    """Instantiate a named implementation with relevant args.
+
+    Passes verbose to all implementations. Passes lanes to implementations
+    that accept it (farrar, c_farrar).
 
     Raises ValueError for unknown names.
     """
-    impl = SCORING_REGISTRY.get(name)
-    if impl is None:
+    cls = SCORING_REGISTRY.get(name)
+    if cls is None:
         available = ", ".join(sorted(SCORING_REGISTRY))
-        raise ValueError(
-            f"unknown implementation {name!r}; available: {available}"
-        )
-    results, _ = impl(
-        len(query), len(reference),
-        match, mismatch, gap_open, gap_extend,
-        query, reference,
-        lanes=lanes, rec=rec,
-    )
-    return results[0]
+        raise ValueError(f"unknown implementation {name!r}; available: {available}")
+    kwargs: dict = {"verbose": getattr(args, "verbose", 0)}
+    if name in _LANES_IMPLS:
+        kwargs["lanes"] = getattr(args, "lanes", 8)
+    return cls(**kwargs)
