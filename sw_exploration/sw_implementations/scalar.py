@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import array
 
-from ..types import AlgorithmImplementation, AlignmentResult, Recorder, TracebackResult, NEG_INF
+from ..types import Aligner, AlignmentResult, Recorder, TracebackResult, NEG_INF
 
 
 def score_pair(a: str, b: str, match: int, mismatch: int) -> int:
@@ -69,6 +69,7 @@ def smith_waterman_dp(
 
                 rec.count("smith_waterman.cell_max_reductions")
                 h[i][j] = max(0, diag, e[i][j], f[i][j])
+                rec.add_cell_event("h_matrix", i, j, h[i][j])
 
                 if h[i][j] == 0:
                     ptr[i][j] = "stop"
@@ -135,26 +136,21 @@ def traceback_alignment(
     )
 
 
-class ScalarImpl(AlgorithmImplementation):
+class ScalarImpl(Aligner):
     """Reference scalar affine-gap Smith-Waterman implementation."""
 
     def __init__(self, verbose: int = 0) -> None:
         self.verbose = verbose
         self.rec = Recorder(verbose=verbose)
         self.results: list[AlignmentResult] = []
-        self.h_matrices: list[list[list[int]]] = []
         self.pair_recs: list[Recorder] = []
 
-    def run(self, pairs: list[tuple[str, str, str, str]], pen: array.array) -> None:
-        for _qname, qseq, _rname, rseq in pairs:
+    def run(self, pen: array.array) -> None:
+        # Separate direction matrix also stored in ptr for traceback
+        for _qname, qseq, _rname, rseq in self.pairs:
             pair_rec = Recorder(verbose=self.verbose)
             result, h, ptr = smith_waterman_dp(qseq, rseq, pen, pair_rec)
             traceback_alignment(qseq, rseq, h, ptr, result, pair_rec)
             self.results.append(result)
-            self.h_matrices.append(h)
             self.pair_recs.append(pair_rec)
-            self.rec.counts.update(pair_rec.counts)
-            self.rec.times.update(pair_rec.times)
-            self.rec.events.extend(pair_rec.events)
-            for k, v in pair_rec.cell_events.items():
-                self.rec.cell_events.setdefault(k, []).extend(v)
+            self.rec.add_time("smith_waterman.dp_fill", pair_rec.times.get("smith_waterman.dp_fill", 0.0))

@@ -13,7 +13,7 @@ import sys
 
 from cffi import FFI
 
-from ..types import AlgorithmImplementation, AlignmentResult, Recorder
+from ..types import Aligner, AlignmentResult, Recorder
 
 _here = os.path.dirname(os.path.abspath(__file__))
 
@@ -45,7 +45,7 @@ ffibuilder.set_source(
 )
 
 try:
-    ffibuilder.compile(tmpdir=_here, verbose=False)
+    ffibuilder.compile(tmpdir="./", verbose=False) # FIX: setting tmpdir to _here seems to create a new path inside of file's directory
 except OSError as exc:
     raise ImportError("c_scalar: failed to compile scalar.c") from exc
 
@@ -58,54 +58,44 @@ _lib = _swag_ffi.lib
 _ffi = _swag_ffi.ffi
 
 
-def _align_one(qseq: str, rseq: str, pen: array.array, rec: Recorder) -> tuple[AlignmentResult, list[list[int]]]:
-    """Align one pair via the C kernel. Returns (result, h_matrix)."""
+# Function deprecated
+# Since C implementations are meant to run faster the preferred method is to run in a batch.
+def _align_one(qseq: str, rseq: str, pen: array.array, rec: Recorder) -> AlignmentResult:
+    """Align one pair via the C kernel.
+
+    Records one "h_matrix" cell event per filled cell into rec.
+    """
     ref_len_c = len(rseq) + 1
     qry_len_c = len(qseq) + 1
     ref_bytes = b'\x00' + rseq.encode('ascii')
     qry_bytes = b'\x00' + qseq.encode('ascii')
 
     penalties = _ffi.new("int8_t[6]", list(pen))
+    best_cell = _ffi.new("struct bestCell *", [0, 0, 0]) # iniatilize bestCell to 0
     H_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c)
+    E_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c)
+    F_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c)
 
-    with rec.timed("c_scalar.dp_fill"):
-        _lib.alignOne(ref_len_c, qry_len_c, penalties, ref_bytes, qry_bytes, H_buf)
-
-    h = [
-        [int(H_buf[j * ref_len_c + k]) for k in range(ref_len_c)]
-        for j in range(qry_len_c)
-    ]
-
-    best_score = 0
-    best_j = best_k = 0
-    for j in range(1, qry_len_c):
-        for k in range(1, ref_len_c):
-            if h[j][k] > best_score:
-                best_score = h[j][k]
-                best_j, best_k = j, k
-
-    return AlignmentResult(best_score, best_j, best_k), h
+    with rec.timed("smith_waterman.dp_fill"):
+        _lib.alignOne(ref_len_c, qry_len_c, penalties, ref_bytes, qry_bytes, H_buf, E_buf, F_buf, best_cell)
 
 
-class CScalarImpl(AlgorithmImplementation):
+    return AlignmentResult(best_cell.score, best_cell.row, best_cell.col)
+
+
+class CScalarImpl(Aligner):
     """C-backed scalar Smith-Waterman implementation."""
 
     def __init__(self, verbose: int = 0) -> None:
         self.verbose = verbose
         self.rec = Recorder(verbose=verbose)
         self.results: list[AlignmentResult] = []
-        self.h_matrices: list[list[list[int]]] = []
         self.pair_recs: list[Recorder] = []
 
-    def run(self, pairs: list[tuple[str, str, str, str]], pen: array.array) -> None:
-        for _qname, qseq, _rname, rseq in pairs:
+    def run(self, pen: array.array) -> None:
+        for _qname, qseq, _rname, rseq in self.pairs:
             pair_rec = Recorder(verbose=self.verbose)
-            result, h = _align_one(qseq, rseq, pen, pair_rec)
+            result = _align_one(qseq, rseq, pen, pair_rec)
             self.results.append(result)
-            self.h_matrices.append(h)
             self.pair_recs.append(pair_rec)
-            self.rec.counts.update(pair_rec.counts)
-            self.rec.times.update(pair_rec.times)
-            self.rec.events.extend(pair_rec.events)
-            for k, v in pair_rec.cell_events.items():
-                self.rec.cell_events.setdefault(k, []).extend(v)
+            self.rec.add_time("smith_waterman.dp_fill", pair_rec.times.get("smith_waterman.dp_fill", 0.0))

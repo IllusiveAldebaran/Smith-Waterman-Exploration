@@ -24,6 +24,25 @@ from pathlib import Path
 # Console helpers
 # ---------------------------------------------------------------------------
 
+# Since events are sometimes stored as cell events these reconstruct into a matrix
+# Ex: if farrar's LazyF loop triggers in cell [2,3] and [43,5] and that's all the info stored
+#     then this reconstructs it so its actual stats in a matrix
+def matrix_from_cell_events(
+    events: list[tuple[int, int, int | None]], rows: int, cols: int, default: int = 0
+) -> list[list[int]]:
+    """Reconstruct a dense matrix by placing each (row, col, value) event's
+    value at its cell. Cells with no matching event keep `default`.
+
+    Works for any cell-event list recorded via Recorder.add_cell_event —
+    e.g. an "h_matrix" event list (one entry per cell) — not specific to
+    H-matrix scores.
+    """
+    mat = [[default] * cols for _ in range(rows)]
+    for row, col, value in events:
+        mat[row][col] = value
+    return mat
+
+
 def format_matrix(matrix: list[list[int]], query: str, reference: str) -> str:
     header = "      " + " ".join(f"{ch:>3}" for ch in "-" + reference)
     lines = [header]
@@ -40,7 +59,7 @@ def print_counts(title: str, counts: Counter[str], prefix: str | None = None) ->
             print(f"  {key}: {counts[key]}")
 
 
-def print_times(times: Counter[str]) -> None:
+def print_times(times: dict[str, float]) -> None:
     total = sum(times.values())
     print("\nTiming:")
     for key in sorted(times):
@@ -49,13 +68,13 @@ def print_times(times: Counter[str]) -> None:
         print(f"  {key}: {seconds:.6f}s ({pct:.2f}% of recorded time)")
 
 
-def smith_waterman_time(times: Counter[str]) -> float:
+def smith_waterman_time(times: dict[str, float]) -> float:
     return times.get("smith_waterman.dp_fill", 0.0) + times.get(
         "smith_waterman.traceback", 0.0
     )
 
 
-def farrar_time(times: Counter[str]) -> float:
+def farrar_time(times: dict[str, float]) -> float:
     return (
         times.get("farrar.profile_build", 0.0)
         + times.get("farrar.main_striped_pass", 0.0)
@@ -70,12 +89,12 @@ def farrar_time(times: Counter[str]) -> float:
 def _overlay_lazy_f(ax, p, mat, **_):
     import numpy as np
     from matplotlib.lines import Line2D
-    triggers = p.get("lazy_f_triggers", [])
+    triggers = p.get("triggers", {}).get("farrar.lazy_f_trigger", [])
     if not triggers:
         return None
-    # Triggers stored as (query_row, ref_col); after transpose x=query, y=ref.
-    xs = [r for r, c in triggers]
-    ys = [c for r, c in triggers]
+    # Triggers stored as (query_row, ref_col, value); after transpose x=query, y=ref.
+    xs = [r for r, c, _ in triggers]
+    ys = [c for r, c, _ in triggers]
     ax.scatter(xs, ys, c="lime", s=4, alpha=0.8, marker=".")
     return Line2D([0], [0], marker=".", color="w", markerfacecolor="lime",
                   markersize=6, label=f"lazy-F ({len(triggers)})")
@@ -124,7 +143,7 @@ OVERLAY_REGISTRY: dict[str, callable] = {
 def build_matrix_figure(
     pairs: list[dict],
     overlays: list[str] | None = None,
-    metric: str = "Smith-Waterman score",
+    metric: str = "SWaG max score",
     annotate: bool = False,
 ):
     """Build a figure showing each pair's H matrix.
@@ -205,7 +224,7 @@ def build_matrix_figure(
                     ax.text(j, i, str(int(val)), ha="center", va="center",
                             fontsize=fontsize, color=color)
 
-        title = f"{p['query_name']} × {p['reference_name']}\nscore={p['score']}"
+        title = f"{p['query_name']} × {p['reference_name']}\nmax score={p['score']}"
         ax.set_title(title, fontsize=8, pad=14)
 
     for idx in range(n, rows * cols):
@@ -302,15 +321,8 @@ def write_output(path: str, pairs_data: list[dict], pen, args: object) -> None:
         },
         "lanes": getattr(args, "lanes", 8),
     }
-    pairs_out = []
-    for p in pairs_data:
-        entry = {k: v for k, v in p.items() if k not in ("h_matrix", "lazy_f_triggers")}
-        entry["h_matrix"] = p["h_matrix"]
-        entry["lazy_f_triggers"] = p.get("lazy_f_triggers", [])
-        pairs_out.append(entry)
-
     with Path(path).expanduser().open("w", encoding="utf-8") as f:
-        json.dump({"metadata": meta, "pairs": pairs_out}, f, indent=2)
+        json.dump({"metadata": meta, "pairs": pairs_data}, f, indent=2)
 
 
 # ---------------------------------------------------------------------------

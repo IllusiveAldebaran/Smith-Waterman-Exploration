@@ -22,9 +22,8 @@ from .output import (
     build_summary_figure,
     farrar_time,
     format_matrix,
+    matrix_from_cell_events,
     next_output_path,
-    print_counts,
-    print_times,
     smith_waterman_time,
     write_output,
 )
@@ -104,12 +103,17 @@ def parse_args() -> argparse.Namespace:
                         help="number of SIMD lanes for farrar/c_farrar (default: 8)")
 
     # --- output ---
+    # TODO: fix the verbose argument to allow exlusivity between choices 0-3
+    # 0 summary only, minimal output, 1 events/progress, 2 full counters, 3 debug output flag
     parser.add_argument(
         "--verbose", type=int, choices=[0, 1, 2], default=0,
         help="0: summary only, 1: stage events per pair, 2: full counters",
     )
     parser.add_argument("--show-matrix", action="store_true",
                         help="print the Smith-Waterman H matrix for each pair")
+    parser.add_argument("--show-triggers", action="store_true",
+                        help="print per-pair counts for every recorded cell-event "
+                             "trigger label (e.g. farrar.lazy_f_trigger)")
     parser.add_argument(
         "--heatmap", default=None,
         help="save H matrix figure to file (.png, .pdf, etc.)",
@@ -141,6 +145,7 @@ def parse_args() -> argparse.Namespace:
                         help="also run scalar DP and flag score mismatches")
     parser.add_argument("--summary", action="store_true",
                         help="show a per-pair bar chart (score + lazy-F) instead of H matrices")
+    # TODO: remove this argument and refactor the verbosity flag
     parser.add_argument("--progress", action="store_true")
 
     return parser.parse_args()
@@ -181,15 +186,22 @@ def main() -> None:
     pairs = build_pairs(args)
     pen = parse_penalties(args.penalties)
 
-    # Run the chosen implementation over all pairs.
-    impl = create_impl(args.implementation, args)
-    impl.run(pairs, pen)
+    # Insantiate and run Smith-Waterman-Gotoh implementation
+    #   ____ _  _ _ ___ _  _    _ _ _ ____ ___ ____ ____ _  _ ____ _  _    ____ ____ ___ ____ _  _ 
+    #   [__  |\/| |  |  |__| __ | | | |__|  |  |___ |__/ |\/| |__| |\ | __ | __ |  |  |  |  | |__| 
+    #   ___] |  | |  |  |  |    |_|_| |  |  |  |___ |  \ |  | |  | | \|    |__] |__|  |  |__| |  | 
+    # This is the main entrance to the rest of the code
+    impl = create_impl(args.implementation, args, pairs)
+    impl.run(pen)
+
+    # Code after this line is for output, validation, etc.
 
     # Optionally run scalar DP for score validation (when chosen impl is not scalar).
     scalar_impl = None
     if args.validate_scalar and args.implementation != "scalar":
         scalar_impl = ScalarImpl(verbose=args.verbose)
-        scalar_impl.run(pairs, pen)
+        scalar_impl.pairs = pairs
+        scalar_impl.run(pen)
 
     summary_only = args.summary and not args.show_matrix
     need_matrix_display = (
@@ -200,32 +212,52 @@ def main() -> None:
 
     # Build per-pair output data.
     pairs_data: list[dict] = []
-    total_times: Counter[str] = Counter()
+    total_times: dict[str, float] = Counter()
     total_counts: Counter[str] = Counter()
 
-    for index, (query_name, query_seq, ref_name, ref_seq) in enumerate(pairs):
-        if args.progress:
-            print(f"pair {index + 1}/{len(pairs)}: {query_name} x {ref_name}", flush=True)
+    # iterate through alignment
+    for index, ((query_name, query_seq, ref_name, ref_seq), pair_best, pair_recorder) in enumerate(zip(impl.pairs, impl.results, impl.pair_recs)):
+        # Note we are also iterating through pair_recs and results with index
 
-        result = impl.results[index]
-        pair_rec = impl.pair_recs[index]
+        # Give TracebackResult, unfortunately it's not implemented yet?!?! what madness?!?!
+        dp_fill_time = pair_recorder.times.get("smith_waterman.dp_fill", 0.0)
+        if not dp_fill_time and scalar_impl is not None:
+            dp_fill_time = scalar_impl.pair_recs[index].times.get("smith_waterman.dp_fill", 0.0)
 
-        # Use the chosen impl's h_matrix for display; fall back to scalar's when validating.
+        print(
+            f"pair {index + 1}/{len(pairs)}: {query_name} x {ref_name}\n"
+            f"max_score={pair_best.score}"
+            f", dp_fill_time={dp_fill_time:.6f}s"
+            ,flush=True
+        )
+
+        # Use the chosen impl's h_matrix cell events for display; fall back
+        # to scalar's when validating.
         h_matrix: list[list[int]] | None = None
         if need_matrix_display:
-            if hasattr(impl, 'h_matrices') and impl.h_matrices[index] is not None:
-                h_matrix = impl.h_matrices[index]
-            elif scalar_impl is not None:
-                h_matrix = scalar_impl.h_matrices[index]
+            h_events = pair_recorder.cell_events.get("h_matrix")
+            if h_events is None and scalar_impl is not None:
+                h_events = scalar_impl.pair_recs[index].cell_events.get("h_matrix")
+            if h_events is not None:
+                h_matrix = matrix_from_cell_events(
+                    h_events, len(query_seq) + 1, len(ref_seq) + 1
+                )
 
-        lazy_f = pair_rec.counts.get("farrar.lazy_f_corrections", 0)
-        lazy_f_triggers = pair_rec.cell_events.get("farrar.lazy_f_trigger", [])
-        total_times.update(pair_rec.times)
-        total_counts.update(pair_rec.counts)
+        lazy_f = pair_recorder.counts.get("farrar.lazy_f_corrections", 0)
+
+        # Every non-"h_matrix" cell-event label is a "trigger" position list
+        # (e.g. farrar.lazy_f_trigger); kept generic rather than farrar-specific.
+        triggers = {
+            label: events
+            for label, events in pair_recorder.cell_events.items()
+            if label != "h_matrix"
+        }
+        total_times.update(pair_recorder.times)
+        total_counts.update(pair_recorder.counts)
 
         score_mismatch = False
         if scalar_impl is not None:
-            score_mismatch = scalar_impl.results[index].score != result.score
+            score_mismatch = scalar_impl.results[index].score != pair_best.score
 
         pairs_data.append(
             {
@@ -236,25 +268,26 @@ def main() -> None:
                 "reference_seq": ref_seq,
                 "query_len": len(query_seq),
                 "reference_len": len(ref_seq),
-                "score": result.score,
-                "end_query": result.end_query,
-                "end_reference": result.end_reference,
+                "score": pair_best.score,
+                "end_query": pair_best.end_query,
+                "end_reference": pair_best.end_reference,
                 "lazy_f_corrections": lazy_f,
-                "lazy_f_triggers": lazy_f_triggers,
+                "triggers": triggers,
                 "score_mismatch": int(score_mismatch),
-                "smith_waterman_time_s": smith_waterman_time(pair_rec.times),
-                "farrar_time_s": farrar_time(pair_rec.times),
+                "smith_waterman_time_s": smith_waterman_time(pair_recorder.times),
+                "farrar_time_s": farrar_time(pair_recorder.times),
                 "h_matrix": h_matrix,
             }
         )
 
-        if lazy_f > 0:
-            print(
-                f"  pair {index:>3}: {query_name} x {ref_name}"
-                f"  score={result.score}"
-                f"  lazy_f_corrections={lazy_f}"
-                f"  lazy_f_triggers={len(lazy_f_triggers)}"
-            )
+        if args.show_triggers:
+            for label, events in triggers.items():
+                if events:
+                    print(
+                        f"  pair {index:>3}: {query_name} x {ref_name}"
+                        f"  score={pair_best.score}"
+                        f"  {label}={len(events)}"
+                    )
 
         if args.show_matrix and h_matrix is not None:
             print(f"\nH matrix for {query_name} x {ref_name}:")
@@ -263,29 +296,40 @@ def main() -> None:
         if args.verbose >= 1:
             label = "full events" if args.verbose >= 2 else "stage events"
             print(f"\n{label} for {query_name} x {ref_name}:")
-            for event in pair_rec.events:
+            for event in pair_recorder.events:
                 print(f"  {event}")
+    # End of iterating through results
+    # Anything afterward can be a summary or needed to loop through all elements first
 
-    if not args.no_results:
-        output_path = next_output_path(args.output)
-        write_output(output_path, pairs_data, pen, args)
-
-    total_lazy_f = sum(p["lazy_f_corrections"] for p in pairs_data)
-    total_triggers = sum(len(p["lazy_f_triggers"]) for p in pairs_data)
-    mismatches = sum(p["score_mismatch"] for p in pairs_data)
     print(
-        f"pairs={len(pairs)}"
-        f", lazy_f_corrections={total_lazy_f}"
-        f", lazy_f_trigger_cells={total_triggers}"
-        f", mismatches={mismatches}"
-        f", farrar_time={farrar_time(total_times):.6f}s"
+        f"Overall time ",
+        f"dp_fill_time={impl.rec.times.get("smith_waterman.dp_fill", 0.0):.6f}s"
+        ,flush=True
     )
-    if not args.no_results:
-        print(f"output: {output_path}")
 
-    if args.verbose >= 2:
-        print_counts("full counts", total_counts)
-        print_times(total_times)
+
+    # TODO: Add options for what to print besides defaults, 
+    # These lines are commented out as they don't really reflect getting the stats wanted from everything
+    # as the current --summary flag isn't well implemented
+
+    #
+    #total_lazy_f = sum(p["lazy_f_corrections"] for p in pairs_data)
+    #total_triggers = sum(
+    #    len(events) for p in pairs_data for events in p["triggers"].values()
+    #)
+    #mismatches = sum(p["score_mismatch"] for p in pairs_data)
+    #print(
+    #    f"pairs={len(pairs)}"
+    #    f", max_score={max_score}"
+    #    f", score_time={score_time(total_times):.6f}s"
+    #)
+    #if not args.no_results:
+    #    print(f"output: {output_path}")
+
+    #if args.verbose >= 2:
+    #    print_counts("full counts", total_counts)
+    #    print_times(total_times)
+    #
 
     if args.preview or args.heatmap:
         import matplotlib.pyplot as plt

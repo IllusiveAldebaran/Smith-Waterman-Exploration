@@ -24,7 +24,6 @@ Entry point: `./smith_waterman_exploration.py` (thin shim calling `sw_exploratio
 ```
 sw_exploration/
   cli.py               # argparse, build_pairs(), main loop
-  runner.py            # run_one_pair() — single shared inner loop
   types.py             # AlignmentResult, TracebackResult, Recorder
   output.py            # console helpers, build_matrix_figure, build_summary_figure, write_output
   fasta.py             # load_fasta_pairs, normalize_sequence (wraps kseq_reader)

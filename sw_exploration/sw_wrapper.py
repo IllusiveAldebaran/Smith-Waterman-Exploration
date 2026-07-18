@@ -1,12 +1,12 @@
-"""Runtime dispatch wrapper for Smith-Waterman implementations.
+"""Runtime dispatch wrapper for Smith-Waterman-Gotoh implementations.
 
 All concrete implementations live in sw_implementations/ and expose a class
-that subclasses AlgorithmImplementation.  This module imports them, registers
-them in SCORING_REGISTRY, and exposes create_impl() for CLI instantiation.
+that subclasses Aligner.  This module imports them, registers them in
+SCORING_REGISTRY, and exposes create_impl() for CLI instantiation.
 
 Adding a new implementation
 ---------------------------
-1. Create sw_implementations/myimpl.py with a class MyImpl(AlgorithmImplementation).
+1. Create sw_implementations/myimpl.py with a class MyImpl(Aligner).
 2. Register it here:
 
      from .sw_implementations import myimpl
@@ -20,15 +20,15 @@ from __future__ import annotations
 import argparse
 
 from .sw_implementations import c_farrar, c_scalar, farrar, scalar
-from .types import AlgorithmImplementation
+from .types import Aligner
 
 # ---------------------------------------------------------------------------
 # Registry — maps implementation name to its class.
-# Each class must subclass AlgorithmImplementation and accept at minimum
-# verbose=0 in its constructor. Implementation-specific params (e.g. lanes)
-# are also accepted by the classes that need them.
+# Each class must subclass Aligner and accept at minimum verbose=0 in its
+# constructor. Implementation-specific params (e.g. lanes) are also accepted
+# by the classes that need them.
 # ---------------------------------------------------------------------------
-SCORING_REGISTRY: dict[str, type[AlgorithmImplementation]] = {
+SCORING_REGISTRY: dict[str, type[Aligner]] = {
     "scalar":   scalar.ScalarImpl,
     "farrar":   farrar.FarrarImpl,
     "c_scalar": c_scalar.CScalarImpl,
@@ -39,11 +39,16 @@ SCORING_REGISTRY: dict[str, type[AlgorithmImplementation]] = {
 _LANES_IMPLS = {"farrar", "c_farrar"}
 
 
-def create_impl(name: str, args: argparse.Namespace) -> AlgorithmImplementation:
-    """Instantiate a named implementation with relevant args.
+def create_impl(
+    name: str,
+    args: argparse.Namespace,
+    pairs: list[tuple[str, str, str, str]],
+) -> Aligner:
+    """Instantiate a named implementation with relevant args and its pairs.
 
     Passes verbose to all implementations. Passes lanes to implementations
-    that accept it (farrar, c_farrar).
+    that accept it (farrar, c_farrar). Sets .pairs on the instance so run()
+    can iterate over them.
 
     Raises ValueError for unknown names.
     """
@@ -54,4 +59,6 @@ def create_impl(name: str, args: argparse.Namespace) -> AlgorithmImplementation:
     kwargs: dict = {"verbose": getattr(args, "verbose", 0)}
     if name in _LANES_IMPLS:
         kwargs["lanes"] = getattr(args, "lanes", 8)
-    return cls(**kwargs)
+    impl = cls(**kwargs)
+    impl.pairs = pairs
+    return impl
