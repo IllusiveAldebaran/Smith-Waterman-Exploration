@@ -81,6 +81,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reference-length", type=int, default=32,
                         help="length of each randomly generated reference (default: 32)")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--reverse", action="store_true", help="Reverse sequences")
+    parser.add_argument("--transpose", action="store_true",
+                        help="swap query and reference for every pair")
 
     # --- scoring ---
     parser.add_argument(
@@ -139,8 +142,6 @@ def parse_args() -> argparse.Namespace:
                              "(font auto-scales; save high-dpi for large matrices)")
     parser.add_argument("--no-results", action="store_true",
                         help="skip writing the JSON output file")
-    parser.add_argument("--transpose", action="store_true",
-                        help="swap query and reference for every pair")
     parser.add_argument("--validate-scalar", action="store_true",
                         help="also run scalar DP and flag score mismatches")
     parser.add_argument("--summary", action="store_true",
@@ -174,6 +175,9 @@ def build_pairs(args: argparse.Namespace) -> list[tuple[str, str, str, str]]:
 
     if not pairs:
         pairs.append(("query", "ACACACTA", "reference", "AGCACACA"))
+
+    if args.reverse:
+        pairs = [(qn, qs[::-1], rn, rs[::-1]) for qn, qs, rn, rs in pairs]
 
     if args.transpose:
         pairs = [(rn, rs, qn, qs) for qn, qs, rn, rs in pairs]

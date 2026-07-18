@@ -29,7 +29,7 @@ void alignOne(const uint16_t refLen, const uint16_t qryLen, const int8_t penalti
 
       // update E,F,H
       E[j*refLen+i] = max(E[(j  )*refLen+i-1]-penDelExt, H[(j  )*refLen+i-1]-penDelOpen);
-      F[j*refLen+i] = max(E[(j-1)*refLen+i  ]-penInsExt, H[(j-1)*refLen+i  ]-penInsOpen);
+      F[j*refLen+i] = max(F[(j-1)*refLen+i  ]-penInsExt, H[(j-1)*refLen+i  ]-penInsOpen);
       //printf("Scores are: E:%d F:%d cellScore:%d \n", E[j*refLen+i], F[j*refLen+i], cellScore);
       H[j*refLen+i] = max(max(cellScore, 0), max(E[j*refLen+i], F[j*refLen+i]));
 
@@ -62,7 +62,7 @@ void alignBatch(const uint16_t count, const uint16_t refLen, const uint16_t qryL
 
       // update E,F,H
       E[j*refLen+i] = max(E[(j  )*refLen+i-1]-penDelExt, H[(j  )*refLen+i-1]-penDelOpen);
-      F[j*refLen+i] = max(E[(j-1)*refLen+i  ]-penInsExt, H[(j-1)*refLen+i  ]-penInsOpen);
+      F[j*refLen+i] = max(F[(j-1)*refLen+i  ]-penInsExt, H[(j-1)*refLen+i  ]-penInsOpen);
       //printf("Scores are: E:%d F:%d cellScore:%d \n", E[j*refLen+i], F[j*refLen+i], cellScore);
       H[j*refLen+i] = max(max(cellScore, 0), max(E[j*refLen+i], F[j*refLen+i]));
     }

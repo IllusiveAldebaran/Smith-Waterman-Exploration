@@ -65,6 +65,7 @@ def _align_one(qseq: str, rseq: str, pen: array.array, rec: Recorder) -> Alignme
 
     Records one "h_matrix" cell event per filled cell into rec.
     """
+    # padded lenngths
     ref_len_c = len(rseq) + 1
     qry_len_c = len(qseq) + 1
     ref_bytes = b'\x00' + rseq.encode('ascii')
@@ -79,6 +80,11 @@ def _align_one(qseq: str, rseq: str, pen: array.array, rec: Recorder) -> Alignme
     with rec.timed("smith_waterman.dp_fill"):
         _lib.alignOne(ref_len_c, qry_len_c, penalties, ref_bytes, qry_bytes, H_buf, E_buf, F_buf, best_cell)
 
+
+    # Record final corrected H values for this column as h_matrix cell events.
+    for i in range(ref_len_c):
+        for j in range(qry_len_c):
+            rec.add_cell_event("h_matrix", j, i, H_buf[j*ref_len_c+i])
 
     return AlignmentResult(best_cell.score, best_cell.row, best_cell.col)
 
