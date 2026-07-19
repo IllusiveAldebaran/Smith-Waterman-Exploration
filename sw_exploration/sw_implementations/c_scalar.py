@@ -58,36 +58,6 @@ _lib = _swag_ffi.lib
 _ffi = _swag_ffi.ffi
 
 
-# Function deprecated
-# Since C implementations are meant to run faster the preferred method is to run in a batch.
-def _align_one(qseq: str, rseq: str, pen: array.array, rec: Recorder) -> AlignmentResult:
-    """Align one pair via the C kernel.
-
-    Records one "h_matrix" cell event per filled cell into rec.
-    """
-    # padded lenngths
-    ref_len_c = len(rseq) + 1
-    qry_len_c = len(qseq) + 1
-    ref_bytes = b'\x00' + rseq.encode('ascii')
-    qry_bytes = b'\x00' + qseq.encode('ascii')
-
-    penalties = _ffi.new("int8_t[6]", list(pen))
-    best_cell = _ffi.new("struct bestCell *", [0, 0, 0]) # iniatilize bestCell to 0
-    H_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c)
-    E_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c)
-    F_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c)
-
-    with rec.timed("smith_waterman.dp_fill"):
-        _lib.alignOne(ref_len_c, qry_len_c, penalties, ref_bytes, qry_bytes, H_buf, E_buf, F_buf, best_cell)
-
-
-    # Record final corrected H values for this column as h_matrix cell events.
-    for i in range(ref_len_c):
-        for j in range(qry_len_c):
-            rec.add_cell_event("h_matrix", j, i, H_buf[j*ref_len_c+i])
-
-    return AlignmentResult(best_cell.score, best_cell.row, best_cell.col)
-
 
 class CScalarImpl(Aligner):
     """C-backed scalar Smith-Waterman implementation."""
@@ -98,10 +68,85 @@ class CScalarImpl(Aligner):
         self.results: list[AlignmentResult] = []
         self.pair_recs: list[Recorder] = []
 
+    def _align_batch(self) -> None:
+        """Align a batch of reference and query pairs via the C kernel.
+        Packs all of the sequences and matrices together before passing into C kernel
+        Best score of each pair is stored
+
+        Records/Copies back into recorders
+        WARNING: Post score calculation traceback can be done.. but it's not
+        WARNING: Assumes lengths of all queries are the same
+        WARNING: Assumes lengths of all references are the same
+        """
+        # Will return these, should honestly just be owned by the implementation
+        # padded lenngths
+        #ref_len_c = len(rseq) + 1
+        #qry_len_c = len(qseq) + 1
+        #ref_bytes = b'\x00' + rseq.encode('ascii')
+        #qry_bytes = b'\x00' + qseq.encode('ascii')
+
+        #penalties = _ffi.new("int8_t[6]", list(pen))
+        #best_cell = _ffi.new("struct bestCell *", [0, 0, 0]) # iniatilize bestCell to 0
+        #H_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c) #E_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c)
+        #F_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c)
+
+
+        #with rec.timed("smith_waterman.dp_fill"):
+        #    _lib.alignOne(ref_len_c, qry_len_c, penalties, ref_bytes, qry_bytes, H_buf, E_buf, F_buf, best_cell)
+
+
+        ## Record final corrected H values for this column as h_matrix cell events.
+        #for i in range(ref_len_c):
+        #    for j in range(qry_len_c):
+        #        rec.add_cell_event("h_matrix", j, i, H_buf[j*ref_len_c+i])
+
+        #return AlignmentResult(best_cell.score, best_cell.row, best_cell.col)
+
+
+    # FUNCTION DEPRECATED IN FAVOR OF BATCHING
+    # Since C implementations are meant to run faster the preferred method is to run in a batch.
+    def _align_one(self, pair_index: int, pen: array.array) -> None:
+        """Align one pair via the C kernel.
+
+        Records one "h_matrix" cell event per filled cell into rec.
+        """
+        # Getting elements from class attributes
+        qname, qseq, rname, rseq = self.pairs[pair_index]
+
+        pair_rec = Recorder()
+
+        # padded lenngths
+        ref_len_c = len(rseq) + 1
+        qry_len_c = len(qseq) + 1
+        ref_bytes = b'\x00' + rseq.encode('ascii')
+        qry_bytes = b'\x00' + qseq.encode('ascii')
+
+        penalties = _ffi.new("int8_t[6]", list(pen))
+        best_cell = _ffi.new("struct bestCell *", [0, 0, 0]) # iniatilize bestCell to 0
+        H_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c)
+        E_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c)
+        F_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c)
+
+        with pair_rec.timed("smith_waterman.dp_fill"):
+            _lib.alignOne(ref_len_c, qry_len_c, penalties, ref_bytes, qry_bytes, H_buf, E_buf, F_buf, best_cell)
+
+        self.results.append(AlignmentResult(best_cell.score, best_cell.row, best_cell.col))
+        self.pair_recs.append(pair_rec)
+
+
+        # Record final corrected H values for this column as h_matrix cell events.
+        # It's just a copy into a Recorder
+        for i in range(ref_len_c):
+            for j in range(qry_len_c):
+                pair_rec.add_cell_event("h_matrix", j, i, H_buf[j*ref_len_c+i])
+
+        self.rec.add_time("smith_waterman.dp_fill", pair_rec.times.get("smith_waterman.dp_fill", 0.0))
+
     def run(self, pen: array.array) -> None:
-        for _qname, qseq, _rname, rseq in self.pairs:
-            pair_rec = Recorder(verbose=self.verbose)
-            result = _align_one(qseq, rseq, pen, pair_rec)
-            self.results.append(result)
-            self.pair_recs.append(pair_rec)
-            self.rec.add_time("smith_waterman.dp_fill", pair_rec.times.get("smith_waterman.dp_fill", 0.0))
+    #    _align_batch(len(self.pairs), self.pairs, pen)
+
+    # This code runs as a previous and working replacement to run(), but loops the multiple 
+    # sequences through python instead of C calling C's align_one()
+        # we know the size by now, we're starting the references here
+        for index in range(len(self.pairs)):
+            self._align_one(index, pen)
