@@ -38,6 +38,8 @@ ffibuilder.set_source(
     #include <stddef.h>
     #include <stdlib.h>
     #include "swag.h"
+    #include <time.h>
+    #include <stdio.h>
     """,
     sources=[os.path.join(_here, "scalar.c")],
     include_dirs=[_here],
@@ -81,6 +83,14 @@ class CScalarImpl(Aligner):
         # Getting elements from class attributes
         num_pairs = len(self.pairs)
 
+        # This can be edited by dev for profiling
+        N_FLOAT_COUNTERS = 0; # for example 1 or num_pairs and timing every pair in C code
+        N_INT_COUNTERS = 0
+        # Useful for storing info about matrices like timing and counters
+        float_counters = _ffi.new("float[]", N_FLOAT_COUNTERS) if N_FLOAT_COUNTERS > 0 else _ffi.NULL
+        int_counters = _ffi.new("int[]", N_INT_COUNTERS) if N_INT_COUNTERS > 0 else _ffi.NULL
+
+
         # padded lenngths, takes first item assumes all are the same length
         ref_len_c = len(self.pairs[0][3]) + 1
         qry_len_c = len(self.pairs[0][1]) + 1
@@ -94,7 +104,16 @@ class CScalarImpl(Aligner):
         F_buf = _ffi.new("int16_t[]", num_pairs * qry_len_c * ref_len_c)
 
         with self.rec.timed("smith_waterman.dp_fill"):
-            _lib.alignBatch(num_pairs, ref_len_c, qry_len_c, penalties, ref_bytes, qry_bytes, H_buf, E_buf, F_buf, best_cell)
+            _lib.alignBatch(
+                num_pairs, ref_len_c, qry_len_c, penalties, ref_bytes, qry_bytes,
+                H_buf, E_buf, F_buf, best_cell,
+                float_counters, N_FLOAT_COUNTERS,
+                int_counters, N_INT_COUNTERS,
+            )
+        # Another way to bring timings/counters but assuming the C code counted it
+        #if N_FLOAT_COUNTERS > 0:
+        #    self.rec.add_time("smith_waterman.dp_fill", float_counters[0])
+
 
 
         # Record final corrected H values for this column as h_matrix cell events.
@@ -120,6 +139,13 @@ class CScalarImpl(Aligner):
         # Getting elements from class attributes
         qname, qseq, rname, rseq = self.pairs[pair_index]
 
+        # This can be edited by dev for profiling
+        N_FLOAT_COUNTERS = 0; # for example 1 or num_pairs and timing every pair in C code
+        N_INT_COUNTERS = 0
+        # Useful for storing info about matrices like timing and counters
+        float_counters = _ffi.new("float[]", N_FLOAT_COUNTERS) if N_FLOAT_COUNTERS > 0 else _ffi.NULL
+        int_counters = _ffi.new("int[]", N_INT_COUNTERS) if N_INT_COUNTERS > 0 else _ffi.NULL
+
         pair_rec = Recorder()
 
         # padded lenngths
@@ -135,7 +161,13 @@ class CScalarImpl(Aligner):
         F_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c)
 
         with pair_rec.timed("smith_waterman.dp_fill"):
-            _lib.alignOne(ref_len_c, qry_len_c, penalties, ref_bytes, qry_bytes, H_buf, E_buf, F_buf, best_cell)
+            _lib.alignOne(
+                ref_len_c, qry_len_c, penalties, ref_bytes, qry_bytes,
+                H_buf, E_buf, F_buf, best_cell,
+                float_counters, N_FLOAT_COUNTERS,
+                int_counters, N_INT_COUNTERS,
+            )
+        # Unless this code is changed nothing is done with float_counters and int_counters
 
         self.results.append(AlignmentResult(best_cell.score, best_cell.row, best_cell.col))
         self.pair_recs.append(pair_rec)
