@@ -32,7 +32,7 @@ from .sw_implementations.scalar import ScalarImpl
 
 
 def random_sequence(length: int, rng: random.Random) -> str:
-    return "".join(rng.choice("ACGTN") for _ in range(length))
+    return "".join(rng.choice("ACGT") for _ in range(length))
 
 
 def parse_penalties(s: str) -> array.array:

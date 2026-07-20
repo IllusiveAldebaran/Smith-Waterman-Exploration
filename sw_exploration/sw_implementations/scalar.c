@@ -42,32 +42,26 @@ void alignOne(const uint16_t refLen, const uint16_t qryLen, const int8_t penalti
   }
 }
 
-// align one reference and sequence
+// align in a batch
 void alignBatch(const uint16_t count, const uint16_t refLen, const uint16_t qryLen, const int8_t penalties[6], const char* refSeq, const char* qrySeq, int16_t* H, int16_t* E, int16_t* F, bestCell* best_cell) {
-  const int8_t penMatch     = penalties[0];
-  const int8_t penMisMatch  = penalties[1];
-  const int8_t penDelOpen   = penalties[2];
-  const int8_t penDelExt    = penalties[3];
-  const int8_t penInsOpen   = penalties[4];
-  const int8_t penInsExt    = penalties[5];
-  // self reminder: deletions are a horizontal thing, along the reference
-  // insertions are along the vertical, along the query.
 
-  int16_t cellScore;
-  for(size_t j = 1; j < qryLen; j++){
-    for(size_t i = 1; i < refLen; i++){
-      cellScore = (refSeq[i]==qrySeq[j]) ? -penMatch : -penMisMatch;
-      //printf("Comparing %c with %c\n", refSeq[i], qrySeq[j]);
-      cellScore += H[(j-1)*refLen+i-1];
+  int dp_size = refLen * qryLen;
+  int offset = 0;
+  const char* single_refSeq = refSeq;
+  const char* single_qrySeq = qrySeq;
+  int16_t* single_H = H;
+  int16_t* single_E = E;
+  int16_t* single_F = F;
 
-      // update E,F,H
-      E[j*refLen+i] = max(E[(j  )*refLen+i-1]-penDelExt, H[(j  )*refLen+i-1]-penDelOpen);
-      F[j*refLen+i] = max(F[(j-1)*refLen+i  ]-penInsExt, H[(j-1)*refLen+i  ]-penInsOpen);
-      //printf("Scores are: E:%d F:%d cellScore:%d \n", E[j*refLen+i], F[j*refLen+i], cellScore);
-      H[j*refLen+i] = max(max(cellScore, 0), max(E[j*refLen+i], F[j*refLen+i]));
-    }
+  for(int i = 0; i < count; i++) {
+    alignOne(refLen, qryLen, penalties, single_refSeq, single_qrySeq, single_H, single_E, single_F, &best_cell[i]);
+
+    single_refSeq += refLen;
+    single_qrySeq += qryLen;
+    single_H += dp_size;
+    single_E += dp_size;
+    single_F += dp_size;
   }
-
 }
 
 #endif

@@ -68,7 +68,7 @@ class CScalarImpl(Aligner):
         self.results: list[AlignmentResult] = []
         self.pair_recs: list[Recorder] = []
 
-    def _align_batch(self) -> None:
+    def _align_batch(self, pen: array.array) -> None:
         """Align a batch of reference and query pairs via the C kernel.
         Packs all of the sequences and matrices together before passing into C kernel
         Best score of each pair is stored
@@ -78,29 +78,36 @@ class CScalarImpl(Aligner):
         WARNING: Assumes lengths of all queries are the same
         WARNING: Assumes lengths of all references are the same
         """
-        # Will return these, should honestly just be owned by the implementation
-        # padded lenngths
-        #ref_len_c = len(rseq) + 1
-        #qry_len_c = len(qseq) + 1
-        #ref_bytes = b'\x00' + rseq.encode('ascii')
-        #qry_bytes = b'\x00' + qseq.encode('ascii')
+        # Getting elements from class attributes
+        num_pairs = len(self.pairs)
 
-        #penalties = _ffi.new("int8_t[6]", list(pen))
-        #best_cell = _ffi.new("struct bestCell *", [0, 0, 0]) # iniatilize bestCell to 0
-        #H_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c) #E_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c)
-        #F_buf = _ffi.new("int16_t[]", qry_len_c * ref_len_c)
+        # padded lenngths, takes first item assumes all are the same length
+        ref_len_c = len(self.pairs[0][3]) + 1
+        qry_len_c = len(self.pairs[0][1]) + 1
+        ref_bytes = b''.join(b'\x00' + str(pair[3]).encode('ascii') for pair in self.pairs)
+        qry_bytes = b''.join(b'\x00' + str(pair[1]).encode('ascii') for pair in self.pairs)
+
+        penalties = _ffi.new("int8_t[6]", list(pen))
+        best_cell = _ffi.new("struct bestCell[]", num_pairs)
+        H_buf = _ffi.new("int16_t[]", num_pairs * qry_len_c * ref_len_c)
+        E_buf = _ffi.new("int16_t[]", num_pairs * qry_len_c * ref_len_c)
+        F_buf = _ffi.new("int16_t[]", num_pairs * qry_len_c * ref_len_c)
+
+        with self.rec.timed("smith_waterman.dp_fill"):
+            _lib.alignBatch(num_pairs, ref_len_c, qry_len_c, penalties, ref_bytes, qry_bytes, H_buf, E_buf, F_buf, best_cell)
 
 
-        #with rec.timed("smith_waterman.dp_fill"):
-        #    _lib.alignOne(ref_len_c, qry_len_c, penalties, ref_bytes, qry_bytes, H_buf, E_buf, F_buf, best_cell)
-
-
-        ## Record final corrected H values for this column as h_matrix cell events.
-        #for i in range(ref_len_c):
-        #    for j in range(qry_len_c):
-        #        rec.add_cell_event("h_matrix", j, i, H_buf[j*ref_len_c+i])
-
-        #return AlignmentResult(best_cell.score, best_cell.row, best_cell.col)
+        # Record final corrected H values for this column as h_matrix cell events.
+        # It's just a copy into a Recorder
+        for np in range(num_pairs):
+            pair_rec = Recorder()
+            h_offset = np * ref_len_c * qry_len_c
+            res_offset =  ref_len_c * qry_len_c
+            for i in range(ref_len_c):
+                for j in range(qry_len_c):
+                    pair_rec.add_cell_event("h_matrix", j, i, H_buf[h_offset+j*ref_len_c+i])
+            self.pair_recs.append(pair_rec)
+            self.results.append(AlignmentResult(best_cell[np].score, best_cell[np].row, best_cell[np].col))
 
 
     # FUNCTION DEPRECATED IN FAVOR OF BATCHING
@@ -143,10 +150,10 @@ class CScalarImpl(Aligner):
         self.rec.add_time("smith_waterman.dp_fill", pair_rec.times.get("smith_waterman.dp_fill", 0.0))
 
     def run(self, pen: array.array) -> None:
-    #    _align_batch(len(self.pairs), self.pairs, pen)
+        self._align_batch(pen)
 
-    # This code runs as a previous and working replacement to run(), but loops the multiple 
-    # sequences through python instead of C calling C's align_one()
+        # This code runs as a previous and working replacement to run(), but loops the multiple 
+        # sequences through python instead of C calling C's align_one()
         # we know the size by now, we're starting the references here
-        for index in range(len(self.pairs)):
-            self._align_one(index, pen)
+        # for index in range(len(self.pairs)):
+        #     self._align_one(index, pen)
