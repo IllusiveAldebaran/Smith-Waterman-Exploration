@@ -225,8 +225,8 @@ def main() -> None:
 
         # Give TracebackResult, unfortunately it's not implemented yet?!?! what madness?!?!
         dp_fill_time = pair_recorder.times.get("smith_waterman.dp_fill", 0.0)
-        if not dp_fill_time and scalar_impl is not None:
-            dp_fill_time = scalar_impl.pair_recs[index].times.get("smith_waterman.dp_fill", 0.0)
+        if not dp_fill_time and impl is not None:
+            dp_fill_time = impl.pair_recs[index].times.get("smith_waterman.dp_fill", 0.0)
 
         print(
             f"pair {index + 1}/{len(pairs)}: {query_name} x {ref_name}\n"

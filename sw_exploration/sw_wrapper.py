@@ -57,8 +57,9 @@ def create_impl(
         available = ", ".join(sorted(SCORING_REGISTRY))
         raise ValueError(f"unknown implementation {name!r}; available: {available}")
     kwargs: dict = {"verbose": getattr(args, "verbose", 0)}
-    if name in _LANES_IMPLS:
-        kwargs["lanes"] = getattr(args, "lanes", 8)
+    # Haven't implemented different lanes right now (SSE, AVX2, AVX512)
+    #if name in _LANES_IMPLS:
+    #    kwargs["lanes"] = getattr(args, "lanes", 8)
     impl = cls(**kwargs)
     impl.pairs = pairs
     return impl
