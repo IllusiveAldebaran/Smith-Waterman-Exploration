@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <cstdlib>
 
 #include "diagonal.hip"
 //#include "scalar.c"
@@ -34,15 +35,17 @@ int main(int argc, char** argv) {
   // argc → number of arguments
   // argv → array of arguments
   
-  if (argc != 3) {
+  if (argc != 4) {
     printf("Incorrect number of arguments\n");
-    printf("Usage: ./dp_test <reference> <query>\n");
+    printf("Usage: ./dp_test <reference> <query> <threads>\n");
+    printf("Threads should be <min(reference Length, hardware limit)\n");
     return 1;
   }
 
   // we are including the prefixed padding we are going to add
   uint16_t refLen = strlen(argv[1])+1;
   uint16_t qryLen = strlen(argv[2])+1;
+  int npar = atoi(argv[3]);
 
   uint16_t qryLenDiagonal = qryLen + refLen - 1;
 
@@ -98,14 +101,16 @@ int main(int argc, char** argv) {
   int intCount[0];
 
   // KERNEL CALL
-  alignOne<<<1,1>>>(refLen, qryLen, penalties, d_refSeq, d_qrySeq, d_H, d_E, d_F, d_best_cell);//, fCount, 0, intCount, 0);
+  size_t sharedMemBytes = npar * sizeof(struct bestCell); 
+  alignOne<<<1, npar, sharedMemBytes>>>(refLen, qryLen, penalties, d_refSeq, d_qrySeq, d_H, d_E, d_F, d_best_cell);//, fCount, 0, intCount, 0);
   HIP_CHECK(hipDeviceSynchronize());
 
-  //showDP((uint8_t*)(refSeq+1), refLen-1, (uint8_t*)(qrySeq+1), qryLen-1, H, true);
   HIP_CHECK(hipMemcpy(H, d_H, refLen*qryLenDiagonal * sizeof(int16_t), hipMemcpyDeviceToHost));
   HIP_CHECK(hipMemcpy(&best_cell, d_best_cell, sizeof(bestCell), hipMemcpyDeviceToHost));
 
   printf("Best Cell: (%d, %d) diagonal aka (%d, %d) score: %d\n", best_cell.col, best_cell.row, best_cell.col, best_cell.row-best_cell.col, best_cell.score);
+  //print DP to stdout
+  //showDP((uint8_t*)(refSeq+1), refLen-1, (uint8_t*)(qrySeq+1), qryLen-1, H, true);
 
   HIP_CHECK(hipFree(d_H));
   HIP_CHECK(hipFree(d_E));
