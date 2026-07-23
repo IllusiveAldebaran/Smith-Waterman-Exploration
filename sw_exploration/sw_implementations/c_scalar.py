@@ -110,7 +110,8 @@ class CScalarImpl(Aligner):
         ref_bytes = b''.join(b'\x00' + str(pair[3]).encode('ascii') for pair in self.pairs)
         qry_bytes = b''.join(b'\x00' + str(pair[1]).encode('ascii') for pair in self.pairs)
 
-        penalties = self._ffi.new("int8_t[6]", list(pen))
+        # index by 0 to make it clear we're passing the value, not the pointer.
+        penalties = self._ffi.new("const struct Penalties*", list(pen))[0]
         best_cell = self._ffi.new("struct bestCell[]", num_pairs)
         H_buf = self._ffi.new("int16_t[]", num_pairs * qry_len_c * ref_len_c)
         E_buf = self._ffi.new("int16_t[]", num_pairs * qry_len_c * ref_len_c)
@@ -167,7 +168,7 @@ class CScalarImpl(Aligner):
         ref_bytes = b'\x00' + rseq.encode('ascii')
         qry_bytes = b'\x00' + qseq.encode('ascii')
 
-        penalties = self._ffi.new("int8_t[6]", list(pen))
+        penalties = self._ffi.new("const struct Penalties*", list(pen))[0]
         best_cell = self._ffi.new("struct bestCell *", [0, 0, 0]) # iniatilize bestCell to 0
         H_buf = self._ffi.new("int16_t[]", qry_len_c * ref_len_c)
         E_buf = self._ffi.new("int16_t[]", qry_len_c * ref_len_c)
