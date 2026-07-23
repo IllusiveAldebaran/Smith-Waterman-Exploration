@@ -1,23 +1,27 @@
+#include "swag.h"
 /* Diagonally prealigned
  * Changes the algorithm in memory accesses, but it is essentially the same.
  */
-void alignOne(const uint16_t refLen, const uint16_t qryLen,
-			 const int8_t penalties[6],
+
+#include <hip/hip_runtime.h>
+
+__global__ void alignOne(const uint16_t refLen, const uint16_t qryLen,
+			 const Penalties penalties,
 			 const char* refSeq, const char* qrySeq,
 			 int16_t* H, int16_t* E, int16_t* F,
-			 bestCell* best_cell,
-			 float* floatCounters, int nfC,
-			 int* intCounters, int niC) {
+			 bestCell* best_cell) {
+			 // float* floatCounters, int nfC,
+			 // int* intCounters, int niC) {
  
-  const int8_t penMatch     = penalties[0];
-  const int8_t penMisMatch  = penalties[1];
-  const int8_t penDelOpen   = penalties[2];
-  const int8_t penDelExt    = penalties[3];
-  const int8_t penInsOpen   = penalties[4];
-  const int8_t penInsExt    = penalties[5];
+  const int8_t penMatch     = penalties.match;
+  const int8_t penMisMatch  = penalties.mismatch;
+  const int8_t penDelOpen   = penalties.delOpen;
+  const int8_t penDelExt    = penalties.delExt;
+  const int8_t penInsOpen   = penalties.insOpen;
+  const int8_t penInsExt    = penalties.insExt;
 
+  
 
-  //printf("horizontals: %d\n", refLen+qryLen-1);
   for(size_t dy = 2; dy < refLen + qryLen - 1; dy++) {
     size_t dx_lo = (dy >= qryLen) ? (dy - qryLen + 1) : 1;
     size_t dx_hi = (dy < refLen) ? (dy - 1) : (refLen - 1);

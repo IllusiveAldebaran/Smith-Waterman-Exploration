@@ -4,6 +4,10 @@
 #include <time.h>
 #include <stdio.h>
 
+struct Penalties {
+  int8_t match, mismatch, delOpen, delExt, insOpen, insExt;
+};
+
 typedef struct bestCell{
   uint16_t row;
   uint16_t col;
