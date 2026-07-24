@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import argparse
 
-from .sw_implementations import c_farrar, c_scalar, farrar, scalar
+from .sw_implementations import c_scalar, farrar, scalar, hip_diagonal
 from .types import Aligner
 
 # ---------------------------------------------------------------------------
@@ -32,11 +32,11 @@ SCORING_REGISTRY: dict[str, type[Aligner]] = {
     "scalar":   scalar.ScalarImpl,
     "farrar":   farrar.FarrarImpl,
     "c_scalar": c_scalar.CScalarImpl,
-    "c_farrar": c_farrar.CFarrarImpl,
+    "hip_diagonal": hip_diagonal.HIPDiagonalImpl,
 }
 
 # Implementations that accept a lanes parameter at construction.
-_LANES_IMPLS = {"farrar", "c_farrar"}
+_LANES_IMPLS = {"farrar", "hip_diagonal"}
 
 
 def create_impl(
@@ -58,8 +58,8 @@ def create_impl(
         raise ValueError(f"unknown implementation {name!r}; available: {available}")
     kwargs: dict = {"verbose": getattr(args, "verbose", 0)}
     # Haven't implemented different lanes right now (SSE, AVX2, AVX512)
-    #if name in _LANES_IMPLS:
-    #    kwargs["lanes"] = getattr(args, "lanes", 8)
+    if name in _LANES_IMPLS and args.lanes is not None:
+        kwargs["lanes"] = args.lanes
     impl = cls(**kwargs)
     impl.pairs = pairs
     return impl

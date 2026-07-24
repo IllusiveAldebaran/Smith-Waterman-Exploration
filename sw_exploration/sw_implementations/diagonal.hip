@@ -1,9 +1,21 @@
-#include "swag.h"
+#include "diagonal.h"
+
+#include <hip/hip_runtime.h>
+
+#define HIP_CHECK(expression)                                \
+{                                                            \
+    const hipError_t err = expression;                       \
+    if(err != hipSuccess)                                    \
+    {                                                        \
+        fprintf(stderr, "HIP error: %s at %d \n", hipGetErrorString(err) \
+            , __LINE__);				     \
+    }                                                        \
+}
+
+
 /* Diagonally prealigned
  * Changes the algorithm in memory accesses, but it is essentially the same.
  */
-
-#include <hip/hip_runtime.h>
 
 __global__ void alignOne(const uint16_t refLen, const uint16_t qryLen,
 			 const Penalties penalties,
@@ -87,7 +99,7 @@ __global__ void alignOne(const uint16_t refLen, const uint16_t qryLen,
   // Write result from shared to back buffer
   if (tid == 0) {
         *best_cell = shared_best[tid];
-	//printf("New max score: %d at (%d, %d) aka (%d, %d)\n", best_cell->score, best_cell->col, best_cell->row, best_cell->col, best_cell->row-best_cell->col);
+	//printf("HIP Final: %d at (%d, %d) aka (%d, %d)\n", best_cell->score, best_cell->col, best_cell->row, best_cell->col, best_cell->row-best_cell->col);
   }
 
 }
