@@ -1,14 +1,18 @@
 CC      = hipcc
 CFLAGS  = -x hip -O2 -march=native
-LFLAGS  = -shared -fPIC
-#INCLUDES := -Idiagonal.h
+CLFLAGS  = -shared -fPIC
+CINCLUDES := -Ikseqpp_lib/include
+
+CXX      ?= g++
+CXXFLAGS ?= -O2 -std=c++17 -lz
+CXXINCLUDES := -I../../kseqpp_lib/include
 
 libhipdiagonal.so: diagonal.c
 	$(CC) $(CFLAGS) $(LFLAGS) $(INCLUDES) -o $@ $<
 
 # little wrapper for dev, not necessary
 dp_test: test_wrap.cpp
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CXX) $(CXXFLAGS) $(CXXINCLUDES) -o $@ $<
 
 clean:
 	rm -f libhipdiagonal.so
