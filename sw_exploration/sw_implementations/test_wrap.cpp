@@ -2,7 +2,7 @@
 #include <string.h>
 #include <cstdlib>
 
-//#include "diagonal.c"
+#include "diagonal.c"
 
 #include "seq_utils.h"
 
@@ -40,6 +40,8 @@ int main(int argc, char** argv) {
   size_t* qryLens;
   char* refContiguous;
   char* qryContiguous;
+  size_t refLenC; // sequence lengths of contiguous batched sequence
+  size_t qryLenC;
   // Number of sequences
   size_t refNum;
   size_t qryNum;
@@ -51,14 +53,13 @@ int main(int argc, char** argv) {
   {
     size_t i = 0;
 
-    printf("Testing to read the sequences\n");
+    //printf("Testing to read the sequences\n");
     SeqStreamIn ref_iss(argv[1]);
     auto refVec = ref_iss.read();
     // get an array of all lengths
     refLens = (size_t*)calloc(refVec.size(),sizeof(size_t));
     max_refLen = refVec[0].seq.size();
     refNum = refVec.size();
-    printf("reference\n");
     // loop once to find the maximum sequence, fill up refLens too
     for (auto & element : refVec) {
       size_t seqLen = element.seq.size();
@@ -115,9 +116,15 @@ int main(int argc, char** argv) {
   int npar = atoi(argv[3]);
 
 
-  uint16_t qryLenDiagonal = (qryNum * (max_qryLen + 1) + 1) + max_refLen - 1;
+  // assumption is that qryNum = refNum... because it should. User input error elsewise.
+  uint32_t numAligns = qryNum; // don't expect to be doing more than 4.29 billion aligns (max uint32_t)
+  uint16_t qryLenDiagonal = (numAligns * (max_qryLen + 1) + 1) + max_refLen - 1;
   // qryNum should also just be equal to refNum because we are alignins them to each other
-  struct bestCell* best_cells = (struct bestCell*)calloc(qryNum, sizeof(struct bestCell));
+  struct bestCell* best_cells = (struct bestCell*)calloc(numAligns, sizeof(struct bestCell));
+
+  // + 1 because of 0th prefixed padding
+  refLenC = numAligns * (max_refLen+1);
+  qryLenC = numAligns * (max_qryLen+1);
 
 
   int16_t* H = (int16_t*)calloc((max_refLen+1)*qryLenDiagonal, sizeof(int16_t));
@@ -127,16 +134,17 @@ int main(int argc, char** argv) {
 
   Penalties penalties = {MATCH, MISMATCH, PENDELO, PENDELE, PENINSO, PENINSE};
   // just temporary empty variables... for prof/counting
-  int nfC = 0;
-  int niC = 0;
+  const int nfC = 0;
+  const int niC = 0;
   float fCount[nfC];
   int intCount[niC];
 
-  alignManyNpar(max_refLen, max_qryLen,
+  alignBatchNpar(max_refLen, max_qryLen,
 	   	penalties,
 	   	refContiguous, qryContiguous,
 	   	H, E, F,
 	   	best_cells,
+	   	numAligns,
 	   	npar,
       	   	fCount, nfC, intCount, niC);
   // fills H matrix and best_cell
@@ -144,14 +152,15 @@ int main(int argc, char** argv) {
 
   for(i = 0; i < refNum; i++){
     //printf("%c", (refContiguous[i] == 0 ? '0' : refContiguous[i] ));// could be accidentally putting null characters btw
-    printf("Best Cell: (%d, %d) diagonal aka (%d, %d) score: %d\n", best_cells[i].col, best_cells[i].row, best_cell[i].col, best_cell[i].row-best_cell[i].col, best_cell[i].score);
+    printf("Best Cell: (%d, %d) diagonal aka (%d, %zu) score: %d\n", best_cells[i].col, best_cells[i].row, best_cells[i].col, (best_cells[i].row - i*(max_refLen+1))-best_cells[i].col, best_cells[i].score);
     // print out part of the DP related to this alignment
     int qryOff = i * (max_qryLen+1); // offsets
     int refOff = i * (max_refLen+1);
-    showDP((uint8_t*)(refContiguous+1+refOff), refLens[i]-1, (uint8_t*)(qryContiguous+1+qryOff), qryLens[i]-1, H+((max_refLen+1)*(max_qryLen+1))*i, true);
+    //showDP((uint8_t*)(refContiguous+refOff), max_refLen+1, (uint8_t*)(qryContiguous+qryOff), qryLens[i]+1, H+((max_refLen+1)*(max_qryLen+1))*i, true);
   }
+
   // print DP to stdout, not accurate info on the reference sequence but close enough
-  showDP((uint8_t*)(refContiguous+1), max_refLen-1, (uint8_t*)(qryContiguous+1), qryLenDiagonal, H, true);
+  //showDP((uint8_t*)(refContiguous), max_refLen+1, (uint8_t*)(qryContiguous), qryLenC, H, true);
 
   free(H);
   free(E);

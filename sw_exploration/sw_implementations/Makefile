@@ -3,12 +3,12 @@ CFLAGS  = -x hip -O2 -march=native
 CLFLAGS  = -shared -fPIC
 CINCLUDES := -Ikseqpp_lib/include
 
-CXX      ?= g++
-CXXFLAGS ?= -O2 -std=c++17 -lz
+CXX      = hipcc
+CXXFLAGS = -x hip -O2 -std=c++17 -lz
 CXXINCLUDES := -I../../kseqpp_lib/include
 
 libhipdiagonal.so: diagonal.c
-	$(CC) $(CFLAGS) $(LFLAGS) $(INCLUDES) -o $@ $<
+	$(CC) $(CFLAGS) $(CLFLAGS) $(INCLUDES) -o $@ $<
 
 # little wrapper for dev, not necessary
 dp_test: test_wrap.cpp
