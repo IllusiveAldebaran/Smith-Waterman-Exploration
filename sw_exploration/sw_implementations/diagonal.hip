@@ -144,9 +144,11 @@ __global__ void alignBatch(const uint16_t max_refLen, const uint16_t max_qryLen,
         __syncthreads();
       }
       __syncthreads();
-      // save the best thread into shared space for best alignment per pair
+      // save the best thread into shared space for best alignment per pair + fix absolute index -> relative index
       if(tid == 0) {
-        final_best[alignIndex] = shared_best[0];
+        final_best[alignIndex].score = shared_best[0].score;
+        final_best[alignIndex].col   = shared_best[0].col;
+        final_best[alignIndex].row   = shared_best[0].row - (alignIndex*qryLen) - shared_best[0].col;
       }
 
       __syncthreads();

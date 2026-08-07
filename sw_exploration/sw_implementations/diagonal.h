@@ -17,10 +17,13 @@ typedef struct bestCell{
 //void alignOne(const uint16_t refLen, const uint16_t qryLen, const Penalties penalties, const char* refSeq, const char* qrySeq, int16_t* H, int16_t* E, int16_t* F, bestCell* best_cell, float* floatCounters, int nfC, int* intCounters, int niC);
 
 // same as before but has npar for deciding some parallelization at runtime
-extern "C"
+// Weird formatting because the python cffi implementation manually checks for this syntax to ignore these lines
+extern "C" 
+{
 void alignOneNpar(const uint16_t max_refLen, const uint16_t max_qryLen, const Penalties penalties, const char* refSeq, const char* qrySeq, int16_t* H, int16_t* E, int16_t* F, bestCell* best_cell, int npar, float* floatCounters, int nfC, int* intCounters, int niC);
 
 void alignBatchNpar(const uint16_t max_refLen, const uint16_t max_qryLen, const Penalties penalties, const char* refSeq, const char* qrySeq, int16_t* H, int16_t* E, int16_t* F, bestCell* best_cells, uint32_t numAligns, int npar, float* floatCounters, int nfC, int* intCounters, int niC);
+}
 
 /*
  * Assumed that the reference lengths and query lengths are all the same.

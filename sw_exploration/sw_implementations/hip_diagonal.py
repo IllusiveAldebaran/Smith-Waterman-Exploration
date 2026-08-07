@@ -29,12 +29,16 @@ def _build_lib():
     _h_path = os.path.join(_here, "diagonal.h")
     with open(_h_path) as f:
         _header_decls = "\n".join(
-            line for line in f if not line.lstrip().startswith("#") and not line.lstrip().startswith("extern")
+            line for line in f if not line.lstrip().startswith("#") 
+                and not line.lstrip().startswith("extern")
+                and not line.lstrip().startswith("extern")
+                and line.strip() != "{"
+                and line.strip() != "}"
         )
     ffi.cdef(_header_decls)
 
     _DEFAULT_SO_PATH = os.path.join(_here, "libhipdiagonal.so")
-    so_path = os.environ.get("SWAG_SCALAR_LIB", _DEFAULT_SO_PATH)
+    so_path = os.environ.get("SWAG_DIAGONAL_HIP_LIB", _DEFAULT_SO_PATH)
 
     try:
         lib = ffi.dlopen(so_path)
@@ -76,40 +80,39 @@ class HIPDiagonalImpl(Aligner):
 
 
         # padded lenngths, takes first item assumes all are the same length
-        ref_len_c = len(self.pairs[0][3]) + 1
-        qry_len_c = len(self.pairs[0][1]) + 1
-        ref_bytes = b''.join(b'\x00' + str(pair[3]).encode('ascii') for pair in self.pairs)
-        qry_bytes = b''.join(b'\x00' + str(pair[1]).encode('ascii') for pair in self.pairs)
+        max_reflen = len(self.pairs[0][3])
+        max_qrylen = len(self.pairs[0][1])
+        ref_bytes = b''.join((b'\x00' + str(pair[3]).encode('ascii')).ljust(max_reflen+1, b'\x00') for pair in self.pairs)
+        qry_bytes = b''.join((b'\x00' + str(pair[1]).encode('ascii')).ljust(max_qrylen+1, b'\x00') for pair in self.pairs)
+
+        qryLenDiagonal = num_pairs * (max_qrylen + 1) + (max_reflen + 1) - 1;
 
         # index by 0 to make it clear we're passing the value, not the pointer.
         penalties = self._ffi.new("const struct Penalties*", list(pen))[0]
         best_cell = self._ffi.new("struct bestCell[]", num_pairs)
-        H_buf = self._ffi.new("int16_t[]", num_pairs * qry_len_c * ref_len_c)
-        E_buf = self._ffi.new("int16_t[]", num_pairs * qry_len_c * ref_len_c)
-        F_buf = self._ffi.new("int16_t[]", num_pairs * qry_len_c * ref_len_c)
+        H_buf = self._ffi.new("int16_t[]", (qryLenDiagonal) * (max_reflen+1))
+        E_buf = self._ffi.new("int16_t[]", (qryLenDiagonal) * (max_reflen+1))
+        F_buf = self._ffi.new("int16_t[]", (qryLenDiagonal) * (max_reflen+1))
 
         with self.rec.timed("smith_waterman.dp_fill"):
-            self._lib.alignBatch(
-                num_pairs, ref_len_c, qry_len_c, penalties, ref_bytes, qry_bytes,
+            self._lib.alignBatchNpar(
+                max_reflen, max_qrylen, penalties, ref_bytes, qry_bytes,
                 H_buf, E_buf, F_buf, best_cell,
+                num_pairs,
+                self.lanes, # lanes is going to be the number of threads called in the GPU
                 float_counters, N_FLOAT_COUNTERS,
-                int_counters, N_INT_COUNTERS,
+                int_counters, N_INT_COUNTERS
             )
-        # Another way to bring timings/counters but assuming the C code counted it
-        #if N_FLOAT_COUNTERS > 0:
-        #    self.rec.add_time("smith_waterman.dp_fill", float_counters[0])
-
-
 
         # Record final corrected H values for this column as h_matrix cell events.
         # It's just a copy into a Recorder
         for np in range(num_pairs):
             pair_rec = Recorder()
-            h_offset = np * ref_len_c * qry_len_c
-            res_offset =  ref_len_c * qry_len_c
-            for i in range(ref_len_c):
-                for j in range(qry_len_c):
-                    pair_rec.add_cell_event("h_matrix", j, i, H_buf[h_offset+j*ref_len_c+i])
+            h_offset = np * (max_reflen+1) * (max_qrylen+1)
+            res_offset =  (max_reflen+1) * (max_qrylen+1)
+            for i in range(max_reflen+1):
+                for j in range(max_qrylen+1):
+                    pair_rec.add_cell_event("h_matrix", j, i, H_buf[h_offset+j*(max_reflen+1)+i])
             self.pair_recs.append(pair_rec)
             self.results.append(AlignmentResult(best_cell[np].score, best_cell[np].row, best_cell[np].col))
 
@@ -170,10 +173,10 @@ class HIPDiagonalImpl(Aligner):
         self.rec.add_time("smith_waterman.dp_fill", pair_rec.times.get("smith_waterman.dp_fill", 0.0))
 
     def run(self, pen: array.array) -> None:
-        #self._align_batch(pen)
+        self._align_batch(pen)
 
         # This code runs as a previous and working replacement to run(), but loops the multiple 
-        # sequences through python instead of C calling C's align_one()
-        # we know the size by now, we're starting the references here
-        for index in range(len(self.pairs)):
-            self._align_one(index, pen)
+        # sequences through python instead of C calling C's align_one(). As such, it calls 
+        # a gpu kernel per align, which is ridiculous. This was for practice.
+        # for index in range(len(self.pairs)):
+        #     self._align_one(index, pen)
