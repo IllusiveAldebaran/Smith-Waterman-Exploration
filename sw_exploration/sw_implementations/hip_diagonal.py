@@ -60,10 +60,17 @@ class HIPDiagonalImpl(Aligner):
 
     def _align_batch(self, pen: array.array) -> None:
         """Align a batch of reference and query pairs via the C kernel.
-        Packs all of the sequences and matrices together before passing into C kernel
-        Best score of each pair is stored
+        Packs all of the sequences together before passing into C kernel.
+        Best score of each pair is stored.
 
         Records/Copies back into recorders
+        WARNING: H/E/F DP matrices live GPU-side only (see diagonal.c) and are
+        never copied back to the host -- only best_cell (score, end_query,
+        end_reference) survives per pair. h_matrix cell events are not
+        recorded for this implementation (--show-matrix/--heatmap/--preview
+        won't have data to show for hip_diagonal); materializing the whole
+        batch's H matrix on the host was the actual cause of a MemoryError at
+        large numAligns.
         WARNING: Post score calculation traceback can be done.. but it's not
         WARNING: Assumes lengths of all queries are the same
         WARNING: Assumes lengths of all references are the same
@@ -85,35 +92,29 @@ class HIPDiagonalImpl(Aligner):
         ref_bytes = b''.join((b'\x00' + str(pair[3]).encode('ascii')).ljust(max_reflen+1, b'\x00') for pair in self.pairs)
         qry_bytes = b''.join((b'\x00' + str(pair[1]).encode('ascii')).ljust(max_qrylen+1, b'\x00') for pair in self.pairs)
 
-        qryLenDiagonal = num_pairs * (max_qrylen + 1) + (max_reflen + 1) - 1;
-
         # index by 0 to make it clear we're passing the value, not the pointer.
         penalties = self._ffi.new("const struct Penalties*", list(pen))[0]
         best_cell = self._ffi.new("struct bestCell[]", num_pairs)
-        H_buf = self._ffi.new("int16_t[]", (qryLenDiagonal) * (max_reflen+1))
-        E_buf = self._ffi.new("int16_t[]", (qryLenDiagonal) * (max_reflen+1))
-        F_buf = self._ffi.new("int16_t[]", (qryLenDiagonal) * (max_reflen+1))
 
         with self.rec.timed("smith_waterman.dp_fill"):
             self._lib.alignBatchNpar(
                 max_reflen, max_qrylen, penalties, ref_bytes, qry_bytes,
-                H_buf, E_buf, F_buf, best_cell,
+                best_cell,
                 num_pairs,
                 self.lanes, # lanes is going to be the number of threads called in the GPU
                 float_counters, N_FLOAT_COUNTERS,
                 int_counters, N_INT_COUNTERS
             )
 
-        # Record final corrected H values for this column as h_matrix cell events.
-        # It's just a copy into a Recorder
         for np in range(num_pairs):
-            pair_rec = Recorder()
-            h_offset = np * (max_reflen+1) * (max_qrylen+1)
-            res_offset =  (max_reflen+1) * (max_qrylen+1)
-            for i in range(max_reflen+1):
-                for j in range(max_qrylen+1):
-                    pair_rec.add_cell_event("h_matrix", j, i, H_buf[h_offset+j*(max_reflen+1)+i])
-            self.pair_recs.append(pair_rec)
+            # no longer records the H outputs... too many for one batch!
+            #pair_rec = Recorder()
+            #h_offset = np * (max_reflen+1) * (max_qrylen+1)
+            #res_offset =  (max_reflen+1) * (max_qrylen+1)
+            #for i in range(max_reflen+1):
+            #    for j in range(max_qrylen+1):
+            #        pair_rec.add_cell_event("h_matrix", j, i, H_buf[h_offset+j*(max_reflen+1)+i])
+            self.pair_recs.append(Recorder())
             self.results.append(AlignmentResult(best_cell[np].score, best_cell[np].row, best_cell[np].col))
 
 

@@ -4,6 +4,8 @@
 #include <time.h>
 #include <stdio.h>
 
+#define BLOCK_CU_RATIO 8 // Ratio of compute units to CU to allocate for the kernel call
+
 typedef struct Penalties {
   int8_t match, mismatch, delOpen, delExt, insOpen, insExt;
 } Penalties;
@@ -22,7 +24,11 @@ extern "C"
 {
 void alignOneNpar(const uint16_t max_refLen, const uint16_t max_qryLen, const Penalties penalties, const char* refSeq, const char* qrySeq, int16_t* H, int16_t* E, int16_t* F, bestCell* best_cell, int npar, float* floatCounters, int nfC, int* intCounters, int niC);
 
-void alignBatchNpar(const uint16_t max_refLen, const uint16_t max_qryLen, const Penalties penalties, const char* refSeq, const char* qrySeq, int16_t* H, int16_t* E, int16_t* F, bestCell* best_cells, uint32_t numAligns, int npar, float* floatCounters, int nfC, int* intCounters, int niC);
+// H/E/F are GPU-only scratch for the DP recurrence, allocated and freed
+// internally -- never passed in or copied back, since only best_cells (the
+// final answer) is needed by callers. Passing the whole batch's H/E/F back
+// to the host was the actual cause of MemoryError at large numAligns.
+void alignBatchNpar(const uint16_t max_refLen, const uint16_t max_qryLen, const Penalties penalties, const char* refSeq, const char* qrySeq, bestCell* best_cells, uint32_t numAligns, int npar, float* floatCounters, int nfC, int* intCounters, int niC);
 }
 
 /*

@@ -118,7 +118,6 @@ int main(int argc, char** argv) {
 
   // assumption is that qryNum = refNum... because it should. User input error elsewise.
   uint32_t numAligns = qryNum; // don't expect to be doing more than 4.29 billion aligns (max uint32_t)
-  uint16_t qryLenDiagonal = (numAligns * (max_qryLen + 1) + 1) + max_refLen - 1;
   // qryNum should also just be equal to refNum because we are alignins them to each other
   struct bestCell* best_cells = (struct bestCell*)calloc(numAligns, sizeof(struct bestCell));
 
@@ -126,12 +125,8 @@ int main(int argc, char** argv) {
   refLenC = numAligns * (max_refLen+1);
   qryLenC = numAligns * (max_qryLen+1);
 
-
-  int16_t* H = (int16_t*)calloc((max_refLen+1)*qryLenDiagonal, sizeof(int16_t));
-  // these are created just so it fits the code... but they're not used right now as they don't need to exist outside the GPU at the moment
-  int16_t* E;
-  int16_t* F;
-
+  // H/E/F are GPU-only scratch now, allocated/freed internally by
+  // alignBatchNpar -- never passed in or copied back to the host.
   Penalties penalties = {MATCH, MISMATCH, PENDELO, PENDELE, PENINSO, PENINSE};
   // just temporary empty variables... for prof/counting
   const int nfC = 0;
@@ -142,17 +137,17 @@ int main(int argc, char** argv) {
   alignBatchNpar(max_refLen, max_qryLen,
 	   	penalties,
 	   	refContiguous, qryContiguous,
-	   	H, E, F,
 	   	best_cells,
 	   	numAligns,
 	   	npar,
       	   	fCount, nfC, intCount, niC);
-  // fills H matrix and best_cell
+  // fills best_cell
 
 
   for(i = 0; i < refNum; i++){
     //printf("%c", (refContiguous[i] == 0 ? '0' : refContiguous[i] ));// could be accidentally putting null characters btw
-    printf("Best Cell: (%d, %d) diagonal aka (%d, %zu) score: %d\n", best_cells[i].col, best_cells[i].row, best_cells[i].col, (best_cells[i].row - i*(max_refLen+1))-best_cells[i].col, best_cells[i].score);
+    //printf("Best Cell: (%d, %d) diagonal aka (%d, %zu) score: %d\n", best_cells[i].col, best_cells[i].row, best_cells[i].col, (best_cells[i].row - i*(max_refLen+1))-best_cells[i].col, best_cells[i].score);
+    printf("Best Cell: (%d, %d) score: %d\n", best_cells[i].col, best_cells[i].row, best_cells[i].score);
     // print out part of the DP related to this alignment
     int qryOff = i * (max_qryLen+1); // offsets
     int refOff = i * (max_refLen+1);
@@ -162,9 +157,6 @@ int main(int argc, char** argv) {
   // print DP to stdout, not accurate info on the reference sequence but close enough
   //showDP((uint8_t*)(refContiguous), max_refLen+1, (uint8_t*)(qryContiguous), qryLenC, H, true);
 
-  free(H);
-  free(E);
-  free(F);
   free(best_cells);
 
 

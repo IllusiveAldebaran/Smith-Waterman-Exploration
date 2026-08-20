@@ -7,11 +7,11 @@ CXX      = hipcc
 CXXFLAGS = -x hip -O2 -std=c++17 -lz
 CXXINCLUDES := -I../../kseqpp_lib/include
 
-libhipdiagonal.so: diagonal.c
+libhipdiagonal.so: diagonal.c diagonal.hip diagonal.h
 	$(CC) $(CFLAGS) $(CLFLAGS) $(INCLUDES) -o $@ $<
 
 # little wrapper for dev, not necessary
-dp_test: test_wrap.cpp
+dp_test: test_wrap.cpp diagonal.c diagonal.hip diagonal.h seq_utils.h
 	$(CXX) $(CXXFLAGS) $(CXXINCLUDES) -o $@ $<
 
 clean:
