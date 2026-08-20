@@ -12,13 +12,13 @@
 #define max(A, B) ((A) > (B) ? (A) : (B))
 
 // align one reference and sequence
-void alignOne(const uint16_t refLen, const uint16_t qryLen, const int8_t penalties[6], const char* refSeq, const char* qrySeq, int16_t* H, int16_t* E, int16_t* F, bestCell* best_cell, float* floatCounters, int nfC, int* intCounters, int niC) {
-  const int8_t penMatch     = penalties[0];
-  const int8_t penMisMatch  = penalties[1];
-  const int8_t penDelOpen   = penalties[2];
-  const int8_t penDelExt    = penalties[3];
-  const int8_t penInsOpen   = penalties[4];
-  const int8_t penInsExt    = penalties[5];
+void alignOne(const uint16_t refLen, const uint16_t qryLen, const Penalties penalties, const char* refSeq, const char* qrySeq, int16_t* H, int16_t* E, int16_t* F, bestCell* best_cell, float* floatCounters, int nfC, int* intCounters, int niC) {
+  const int8_t penMatch     = penalties.match;
+  const int8_t penMisMatch  = penalties.mismatch;
+  const int8_t penDelOpen   = penalties.delOpen;
+  const int8_t penDelExt    = penalties.delExt;
+  const int8_t penInsOpen   = penalties.insOpen;
+  const int8_t penInsExt    = penalties.insExt;
   // self reminder: deletions are a horizontal thing, along the reference
   // insertions are along the vertical, along the query.
 
@@ -45,7 +45,7 @@ void alignOne(const uint16_t refLen, const uint16_t qryLen, const int8_t penalti
 }
 
 // align in a batch
-void alignBatch(const uint16_t count, const uint16_t refLen, const uint16_t qryLen, const int8_t penalties[6], const char* refSeq, const char* qrySeq, int16_t* H, int16_t* E, int16_t* F, bestCell* best_cell, float* floatCounters, int nfC, int* intCounters, int niC) {
+void alignBatch(const uint16_t count, const uint16_t refLen, const uint16_t qryLen, const Penalties penalties, const char* refSeq, const char* qrySeq, int16_t* H, int16_t* E, int16_t* F, bestCell* best_cell, float* floatCounters, int nfC, int* intCounters, int niC) {
 
   // If we select to have our C code time we can use this
   //struct timespec start, end;

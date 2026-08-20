@@ -230,7 +230,7 @@ def main() -> None:
 
         print(
             f"pair {index + 1}/{len(pairs)}: {query_name} x {ref_name}\n"
-            f"max_score={pair_best.score}"
+            f"max_score={pair_best.score} at {pair_best.end_reference, pair_best.end_query}"
             f", dp_fill_time={dp_fill_time:.6f}s"
             ,flush=True
         )
