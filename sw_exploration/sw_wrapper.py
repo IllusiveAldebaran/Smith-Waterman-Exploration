@@ -38,6 +38,9 @@ SCORING_REGISTRY: dict[str, type[Aligner]] = {
 # Implementations that accept a lanes parameter at construction.
 _LANES_IMPLS = {"farrar", "hip_diagonal"}
 
+# Implementations that accept a second_pass parameter at construction.
+_SECOND_PASS_IMPLS = {"hip_diagonal"}
+
 
 def create_impl(
     name: str,
@@ -56,10 +59,15 @@ def create_impl(
     if cls is None:
         available = ", ".join(sorted(SCORING_REGISTRY))
         raise ValueError(f"unknown implementation {name!r}; available: {available}")
-    kwargs: dict = {"verbose": getattr(args, "verbose", 0)}
+    kwargs: dict = {
+        "verbose": getattr(args, "verbose", 0),
+        "best_cell_only": getattr(args, "best_cell_only", False),
+    }
     # Haven't implemented different lanes right now (SSE, AVX2, AVX512)
     if name in _LANES_IMPLS and args.lanes is not None:
         kwargs["lanes"] = args.lanes
+    if name in _SECOND_PASS_IMPLS:
+        kwargs["second_pass"] = getattr(args, "second_pass", False)
     impl = cls(**kwargs)
     impl.pairs = pairs
     return impl

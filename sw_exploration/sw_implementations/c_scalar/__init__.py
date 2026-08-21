@@ -13,7 +13,7 @@ import sys
 
 from cffi import FFI
 
-from ..types import Aligner, AlignmentResult, Recorder
+from ...types import Aligner, AlignmentResult, Recorder
 
 _here = os.path.dirname(os.path.abspath(__file__))
 
@@ -74,10 +74,19 @@ def _build_lib():
 
 
 class CScalarImpl(Aligner):
-    """C-backed scalar Smith-Waterman implementation."""
+    """C-backed scalar Smith-Waterman implementation.
 
-    def __init__(self, verbose: int = 0) -> None:
+    best_cell_only skips copying the full H matrix into per-cell Recorder
+    events after the C call returns -- that Python-side copy (one tuple per
+    cell, for every pair in the batch) is the actual memory blowup for large
+    batches, not the C-side H_buf itself (which stays a single contiguous
+    allocation). H/E/F are still allocated and filled C-side either way,
+    since alignBatch's DP recurrence needs them as scratch regardless.
+    """
+
+    def __init__(self, verbose: int = 0, best_cell_only: bool = False) -> None:
         self.verbose = verbose
+        self.best_cell_only = best_cell_only
         self.rec = Recorder(verbose=verbose)
         self.results: list[AlignmentResult] = []
         self.pair_recs: list[Recorder] = []
@@ -131,14 +140,17 @@ class CScalarImpl(Aligner):
 
 
         # Record final corrected H values for this column as h_matrix cell events.
-        # It's just a copy into a Recorder
+        # It's just a copy into a Recorder -- skipped under best_cell_only,
+        # since materializing every cell as a Recorder event is the dominant
+        # memory cost for large batches, not the underlying H_buf.
         for np in range(num_pairs):
             pair_rec = Recorder()
-            h_offset = np * ref_len_c * qry_len_c
-            res_offset =  ref_len_c * qry_len_c
-            for i in range(ref_len_c):
-                for j in range(qry_len_c):
-                    pair_rec.add_cell_event("h_matrix", j, i, H_buf[h_offset+j*ref_len_c+i])
+            if not self.best_cell_only:
+                h_offset = np * ref_len_c * qry_len_c
+                res_offset =  ref_len_c * qry_len_c
+                for i in range(ref_len_c):
+                    for j in range(qry_len_c):
+                        pair_rec.add_cell_event("h_matrix", j, i, H_buf[h_offset+j*ref_len_c+i])
             self.pair_recs.append(pair_rec)
             self.results.append(AlignmentResult(best_cell[np].score, best_cell[np].row, best_cell[np].col))
 

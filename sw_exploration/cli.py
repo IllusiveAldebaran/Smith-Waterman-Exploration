@@ -104,6 +104,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--lanes", type=int, default=8,
                         help="number of SIMD lanes for farrar/c_farrar (default: 8)")
+    parser.add_argument(
+        "--best-cell-only", action="store_true",
+        help="only track the best cell's score/location, not the full H/E/F "
+             "matrices; uses far less memory but --show-matrix/--preview/"
+             "--heatmap and traceback have no data to show afterwards",
+    )
+    parser.add_argument(
+        "--second-pass", action="store_true",
+        help="hip_diagonal only: after the normal GPU best-cell pass, run a "
+             "second pass that computes a real backtrace for pairs meeting a "
+             "selection condition. That condition isn't implemented yet, so "
+             "every pair currently qualifies",
+    )
 
     # --- output ---
     # TODO: fix the verbose argument to allow exlusivity between choices 0-3
@@ -214,6 +227,20 @@ def main() -> None:
         or (bool(args.heatmap) and not summary_only)
     )
 
+    # best_cell_only implementations never record "h_matrix" cell events (see
+    # each implementation's run()/_run_pair()), so any of these flags would
+    # otherwise silently produce empty matrices/figures. Warn instead of
+    # failing quietly -- need_matrix_display itself is left alone since the
+    # scalar-validation fallback path below can still supply a matrix.
+    if args.best_cell_only and need_matrix_display and scalar_impl is None:
+        print(
+            "warning: --best-cell-only was set, so the chosen implementation "
+            "recorded no H-matrix data -- --show-matrix/--preview/--heatmap "
+            "will have nothing to display for these pairs unless "
+            "--validate-scalar is also passed",
+            flush=True,
+        )
+
     # Build per-pair output data.
     pairs_data: list[dict] = []
     total_times: dict[str, float] = Counter()
@@ -263,6 +290,23 @@ def main() -> None:
         if scalar_impl is not None:
             score_mismatch = scalar_impl.results[index].score != pair_best.score
 
+        # A real backtrace (aligned_query/aligned_reference/path) is only
+        # ever produced by an implementation's optional second pass (see
+        # hip_diagonal's --second-pass); it's independent of h_matrix, which
+        # is what --show-matrix/--preview/--heatmap consume. best_cell_only
+        # implementations supply neither.
+        traceback_result = None
+        impl_tracebacks = getattr(impl, "tracebacks", None)
+        if impl_tracebacks is not None and impl_tracebacks[index] is not None:
+            tb = impl_tracebacks[index]
+            traceback_result = {
+                "start_query": tb.start_query,
+                "start_reference": tb.start_reference,
+                "aligned_query": tb.aligned_query,
+                "aligned_reference": tb.aligned_reference,
+                "path": tb.path,
+            }
+
         pairs_data.append(
             {
                 "pair_index": index,
@@ -281,6 +325,8 @@ def main() -> None:
                 "smith_waterman_time_s": smith_waterman_time(pair_recorder.times),
                 "farrar_time_s": farrar_time(pair_recorder.times),
                 "h_matrix": h_matrix,
+                "backtrace_available": h_matrix is not None,
+                "traceback": traceback_result,
             }
         )
 

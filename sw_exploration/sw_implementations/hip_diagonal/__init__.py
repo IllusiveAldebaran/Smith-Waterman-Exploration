@@ -12,7 +12,8 @@ import os
 
 from cffi import FFI
 
-from ..types import Aligner, AlignmentResult, Recorder
+from ..scalar import smith_waterman_dp, traceback_alignment
+from ...types import Aligner, AlignmentResult, Recorder, TracebackResult
 
 _here = os.path.dirname(os.path.abspath(__file__))
 
@@ -50,12 +51,27 @@ def _build_lib():
 class HIPDiagonalImpl(Aligner):
     """HIP GPU accelerated Smith-Waterman implementation."""
 
-    def __init__(self, lanes: int = 8, verbose: int = 0) -> None:
+    def __init__(
+        self,
+        lanes: int = 8,
+        verbose: int = 0,
+        best_cell_only: bool = False,
+        second_pass: bool = False,
+    ) -> None:
         self.verbose = verbose
         self.lanes = lanes
+        # H/E/F never leave the device for this implementation regardless (see
+        # _align_batch's warning below), so best_cell_only is a no-op here --
+        # accepted only so the flag can be passed uniformly across impls.
+        self.best_cell_only = best_cell_only
+        self.second_pass = second_pass
         self.rec = Recorder(verbose=verbose)
         self.results: list[AlignmentResult] = []
         self.pair_recs: list[Recorder] = []
+        # One entry per pair once run() returns, mirroring results/pair_recs.
+        # None unless second_pass is enabled and _needs_backtrace() selected
+        # that pair -- see _second_pass_backtrace().
+        self.tracebacks: list[TracebackResult | None] = []
         self._lib, self._ffi = _build_lib()
 
     def _align_batch(self, pen: array.array) -> None:
@@ -173,11 +189,54 @@ class HIPDiagonalImpl(Aligner):
 
         self.rec.add_time("smith_waterman.dp_fill", pair_rec.times.get("smith_waterman.dp_fill", 0.0))
 
+    def _needs_backtrace(self, pair_index: int) -> bool:
+        """Decide whether pair_index should get a real second-pass backtrace.
+
+        STUB: the real condition (e.g. score above a threshold, or some other
+        selection the caller cares about) isn't implemented yet, so every
+        pair currently qualifies. Once a condition exists, only it should
+        change here -- _second_pass_backtrace() already handles "some pairs
+        skipped" via the None entries it appends for pairs that don't qualify.
+        """
+        return True
+
+    def _second_pass_backtrace(self, pen: array.array) -> None:
+        """Compute a real backtrace for pairs selected by _needs_backtrace().
+
+        The GPU pass only ever produces best_cell (score, row, col) -- H/E/F
+        live and die on the device (see _align_batch), so there's nothing on
+        the host to walk back through. Until a dedicated GPU traceback kernel
+        exists, this falls back to re-running the scalar CPU DP (full H +
+        ptr matrices) on just the selected pair and tracing back from there.
+        That's redundant work for a single pair, but it's exact, and it's
+        only paid for pairs _needs_backtrace() actually selects.
+        """
+        for index, (result, (_qname, qseq, _rname, rseq)) in enumerate(
+            zip(self.results, self.pairs)
+        ):
+            if not self._needs_backtrace(index):
+                self.tracebacks.append(None)
+                continue
+            pair_rec = Recorder()
+            _best, h, ptr = smith_waterman_dp(qseq, rseq, pen, pair_rec)
+            tb = traceback_alignment(qseq, rseq, h, ptr, result, pair_rec)
+            self.tracebacks.append(tb)
+            self.rec.add_time(
+                "hip_diagonal.second_pass_backtrace",
+                pair_rec.times.get("smith_waterman.dp_fill", 0.0)
+                + pair_rec.times.get("smith_waterman.traceback", 0.0),
+            )
+
     def run(self, pen: array.array) -> None:
         self._align_batch(pen)
 
-        # This code runs as a previous and working replacement to run(), but loops the multiple 
-        # sequences through python instead of C calling C's align_one(). As such, it calls 
+        if self.second_pass:
+            self._second_pass_backtrace(pen)
+        else:
+            self.tracebacks = [None] * len(self.pairs)
+
+        # This code runs as a previous and working replacement to run(), but loops the multiple
+        # sequences through python instead of C calling C's align_one(). As such, it calls
         # a gpu kernel per align, which is ridiculous. This was for practice.
         # for index in range(len(self.pairs)):
         #     self._align_one(index, pen)
