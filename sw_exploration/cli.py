@@ -266,20 +266,6 @@ def main() -> None:
         or (bool(args.heatmap) and not summary_only)
     )
 
-    # best_cell_only implementations never record "h_matrix" cell events (see
-    # each implementation's run()/_run_pair()), so any of these flags would
-    # otherwise silently produce empty matrices/figures. Warn instead of
-    # failing quietly -- need_matrix_display itself is left alone since the
-    # scalar-validation fallback path below can still supply a matrix.
-    if args.best_cell_only and need_matrix_display and scalar_impl is None:
-        print(
-            "warning: --best-cell-only was set, so the chosen implementation "
-            "recorded no H-matrix data -- --show-matrix/--preview/--heatmap "
-            "will have nothing to display for these pairs unless "
-            "--validate-scalar is also passed",
-            flush=True,
-        )
-
     # Build per-pair output data.
     pairs_data: list[dict] = []
     total_times: dict[str, float] = Counter()
@@ -389,6 +375,21 @@ def main() -> None:
                 print(f"  {event}")
     # End of iterating through results
     # Anything afterward can be a summary or needed to loop through all elements first
+
+    # Checked after the fact (not implementation-by-implementation ahead of
+    # time) so this stays correct as implementations gain/lose h_matrix
+    # support: whatever the reason (best_cell_only, an implementation like
+    # hip_diagonal that never records h_matrix at all, ...), if none of the
+    # data --show-matrix/--preview/--heatmap need actually showed up, say so
+    # instead of silently rendering empty output.
+    if need_matrix_display and not any(p["h_matrix"] is not None for p in pairs_data):
+        print(
+            "warning: no H-matrix data was recorded for any pair -- "
+            "--show-matrix/--preview/--heatmap have nothing to display. "
+            "If --best-cell-only is set, try --validate-scalar too (it "
+            "always fills in a matrix via scalar DP)",
+            flush=True,
+        )
 
     print(
         f"Overall time ",

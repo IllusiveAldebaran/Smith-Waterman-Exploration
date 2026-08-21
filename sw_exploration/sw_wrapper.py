@@ -64,14 +64,18 @@ _GPU: dict[str, bool] = {
 }
 _NOTES: dict[str, str] = {
     "scalar": (
-        "Reference pure-Python affine-gap DP. best_cell_only swaps the full "
-        "H/E/F/ptr matrices for O(reference_len) rolling rows. "
-        "traceback_alignment() exists and runs whenever best_cell_only is "
-        "False, but its result isn't wired into CLI output yet."
+        "Reference pure-Python affine-gap DP. best_cell_only only skips the "
+        "traceback_alignment() call and reuses the AlignmentResult "
+        "smith_waterman_dp() already returns -- the full H/E/F/ptr matrices "
+        "are still filled either way, since a hand-rolled reduced-memory "
+        "variant wouldn't be meaningfully faster in pure Python. "
+        "traceback_alignment()'s result isn't wired into CLI output yet."
     ),
     "farrar": (
-        "Farrar's striped SIMD method simulated in Python. Never builds a "
-        "ptr matrix, so no traceback is possible even outside best_cell_only."
+        "Farrar's striped SIMD method simulated in Python. best_cell_only is "
+        "a no-op -- always records h_matrix/farrar.lazy_f_trigger "
+        "cell_events. Never builds a ptr matrix, so no traceback is "
+        "possible regardless."
     ),
     "c_scalar": (
         "C-backed scalar DP via cffi. best_cell_only skips copying H_buf "

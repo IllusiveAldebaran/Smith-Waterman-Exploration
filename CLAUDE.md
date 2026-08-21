@@ -30,7 +30,7 @@ sw_exploration/
   sw_wrapper.py        # SCORING_REGISTRY, create_impl() dispatch
   sw_implementations/
     scalar/__init__.py       # reference affine-gap DP (smith_waterman_dp,
-                              # smith_waterman_best_cell, traceback_alignment, ScalarImpl)
+                              # traceback_alignment, ScalarImpl)
     farrar/__init__.py       # Farrar's striped method (make_query_profile, FarrarImpl)
     c_scalar/                # C-backed scalar DP via cffi
       __init__.py            # CScalarImpl -- compiles scalar.c at instantiation time
@@ -135,12 +135,12 @@ a new implementation).
 Standard affine-gap DP filling H, E, F and a pointer matrix.
 `smith_waterman_dp()` returns `(AlignmentResult, h_matrix, ptr_matrix)`.
 `traceback_alignment()` walks ptr back to the zero boundary.
-`ScalarImpl.run()` calls `smith_waterman_dp` then `traceback_alignment`, unless
-`best_cell_only` is set, in which case it calls `smith_waterman_best_cell()`
-instead -- a rolling-row version of the same recurrence that only keeps the
-last one or two rows of H/E/F (O(reference_len) instead of
-O(query_len * reference_len) memory) and returns just the best
-score/location, with no ptr matrix and therefore no traceback afterwards.
+`ScalarImpl.run()` always calls `smith_waterman_dp`; `best_cell_only` just
+skips the subsequent `traceback_alignment` call and reuses the
+`AlignmentResult` `smith_waterman_dp()` already returns. It doesn't get its
+own reduced-memory DP variant -- this is pure Python, so a hand-rolled
+rolling-row rewrite wouldn't be meaningfully faster, and it's not worth the
+extra logic to maintain.
 
 ### farrar (`sw_implementations/farrar/__init__.py`)
 
@@ -159,11 +159,9 @@ Three recorded stages:
 `seg_len = ceil(query_len / lanes)`. Query residues are indexed via
 `striped_index_to_query_index(segment, lane, seg_len) = lane * seg_len + segment`.
 
-`best_cell_only` skips the `"h_matrix"` and `"farrar.lazy_f_trigger"`
-`cell_events` recording at the end of each reference column -- those events
-(one Python object per cell) are the actual per-pair memory cost here, not
-the algorithm itself, which already only keeps the current column's
-`h_store`/`e_store`.
+`best_cell_only` is a no-op for `FarrarImpl` -- accepted only for uniformity
+with `create_impl()`'s kwargs. `"h_matrix"`/`"farrar.lazy_f_trigger"`
+`cell_events` are always recorded.
 
 ### c_scalar (`sw_implementations/c_scalar/__init__.py`)
 

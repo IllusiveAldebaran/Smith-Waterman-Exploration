@@ -107,15 +107,12 @@ def _run_pair(
     pen: array.array,
     lanes: int,
     rec: Recorder,
-    best_cell_only: bool = False,
 ) -> AlignmentResult:
     """Align one pair using Farrar's striped method.
 
     Records one "h_matrix" cell event per filled cell (H-matrix coordinates,
     (query_len+1) × (ref_len+1) with row 0 and col 0 as the zero DP boundary)
-    into rec -- unless best_cell_only is set, in which case that recording is
-    skipped (it's the dominant memory cost for large batches) and only the
-    best score/location survive.
+    into rec.
     """
     match, mismatch, del_open, del_ext, ins_open, ins_ext = pen
     rec.count("farrar.invocations")
@@ -202,14 +199,13 @@ def _run_pair(
                         h_store[segment] = corrected
 
                         # Record cells where F actually improved H (in H-matrix coords).
-                        if not best_cell_only:
-                            for lane_k, (orig, corr) in enumerate(zip(h, corrected)):
-                                if corr > orig:
-                                    q_idx = striped_index_to_query_index(segment, lane_k, seg_len)
-                                    if q_idx < query_len:
-                                        rec.add_cell_event(
-                                            "farrar.lazy_f_trigger", q_idx + 1, reference_pos
-                                        )
+                        for lane_k, (orig, corr) in enumerate(zip(h, corrected)):
+                            if corr > orig:
+                                q_idx = striped_index_to_query_index(segment, lane_k, seg_len)
+                                if q_idx < query_len:
+                                    rec.add_cell_event(
+                                        "farrar.lazy_f_trigger", q_idx + 1, reference_pos
+                                    )
 
                         for lane, score in enumerate(corrected):
                             q_index = striped_index_to_query_index(segment, lane, seg_len)
@@ -238,18 +234,22 @@ def _run_pair(
                         rec.count("farrar.lazy_f_corrections")
 
             # Record final corrected H values for this column as h_matrix cell events.
-            if not best_cell_only:
-                for segment in range(seg_len):
-                    for lane, score in enumerate(h_store[segment]):
-                        q_idx = striped_index_to_query_index(segment, lane, seg_len)
-                        if q_idx < query_len:
-                            rec.add_cell_event("h_matrix", q_idx + 1, reference_pos, score)
+            for segment in range(seg_len):
+                for lane, score in enumerate(h_store[segment]):
+                    q_idx = striped_index_to_query_index(segment, lane, seg_len)
+                    if q_idx < query_len:
+                        rec.add_cell_event("h_matrix", q_idx + 1, reference_pos, score)
 
     return best
 
 
 class FarrarImpl(Aligner):
-    """Farrar's striped Smith-Waterman implementation. lanes is set at construction."""
+    """Farrar's striped Smith-Waterman implementation. lanes is set at construction.
+
+    best_cell_only is accepted only for uniformity with create_impl()'s
+    kwargs -- it's a no-op here, same as _run_pair()'s always-on h_matrix /
+    farrar.lazy_f_trigger cell_events recording.
+    """
 
     def __init__(self, lanes: int = 8, verbose: int = 0, best_cell_only: bool = False) -> None:
         self.lanes = lanes
@@ -262,7 +262,7 @@ class FarrarImpl(Aligner):
     def run(self, pen: array.array) -> None:
         for _qname, qseq, _rname, rseq in self.pairs:
             pair_rec = Recorder(verbose=self.verbose)
-            result = _run_pair(qseq, rseq, pen, self.lanes, pair_rec, self.best_cell_only)
+            result = _run_pair(qseq, rseq, pen, self.lanes, pair_rec)
             self.results.append(result)
             self.pair_recs.append(pair_rec)
             self.rec.add_time("smith_waterman.dp_fill", pair_rec.times.get("smith_waterman.dp_fill", 0.0))

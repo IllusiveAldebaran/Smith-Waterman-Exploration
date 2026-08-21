@@ -87,62 +87,6 @@ def smith_waterman_dp(
     return best, h, ptr
 
 
-def smith_waterman_best_cell(
-    query: str,
-    reference: str,
-    pen: array.array,
-    rec: Recorder,
-) -> AlignmentResult:
-    """Fill the scalar affine-gap DP using rolling rows instead of full matrices.
-
-    Only the score and location of the best-scoring cell are needed, so H/E/F
-    are kept for at most two rows at a time (O(reference_len) instead of
-    O(query_len * reference_len)). No ptr matrix is built and no per-cell
-    events are recorded, so unlike smith_waterman_dp() this cannot feed
-    traceback_alignment() or --show-matrix/--preview/--heatmap afterwards --
-    the full matrix it would need is never materialized.
-    """
-    match, mismatch, del_open, del_ext, ins_open, ins_ext = pen
-    rec.count("smith_waterman.invocations")
-    with rec.timed("smith_waterman.dp_fill"):
-        m = len(query)
-        n = len(reference)
-        h_prev = [0] * (n + 1)
-        f_prev = [NEG_INF] * (n + 1)
-
-        best = AlignmentResult(0, 0, 0)
-        for i in range(1, m + 1):
-            rec.count("smith_waterman.dp_rows")
-            h_cur = [0] * (n + 1)
-            f_cur = [NEG_INF] * (n + 1)
-            e = NEG_INF
-            for j in range(1, n + 1):
-                rec.count("smith_waterman.dp_cells")
-                rec.count("smith_waterman.substitution_scores")
-
-                rec.count("smith_waterman.gap_e_updates")
-                e = max(h_cur[j - 1] - del_open, e - del_ext)
-
-                rec.count("smith_waterman.gap_f_updates")
-                f_cur[j] = max(h_prev[j] - ins_open, f_prev[j] - ins_ext)
-
-                rec.count("smith_waterman.diagonal_updates")
-                diag = h_prev[j - 1] + score_pair(
-                    query[i - 1], reference[j - 1], match, mismatch
-                )
-
-                rec.count("smith_waterman.cell_max_reductions")
-                h_cur[j] = max(0, diag, e, f_cur[j])
-
-                if h_cur[j] > best.score:
-                    rec.count("smith_waterman.best_score_updates")
-                    best = AlignmentResult(h_cur[j], i, j)
-
-            h_prev, f_prev = h_cur, f_cur
-
-    return best
-
-
 def traceback_alignment(
     query: str,
     reference: str,
@@ -195,9 +139,10 @@ def traceback_alignment(
 class ScalarImpl(Aligner):
     """Reference scalar affine-gap Smith-Waterman implementation.
 
-    best_cell_only trades away H matrix / traceback availability for
-    O(reference_len) instead of O(query_len * reference_len) memory per pair
-    -- see smith_waterman_best_cell().
+    Pure Python, so there's no real memory/speed win to be had from a
+    separate reduced-tracking DP variant -- best_cell_only just skips the
+    traceback_alignment() call and reuses the AlignmentResult
+    smith_waterman_dp() already returns.
     """
 
     def __init__(self, verbose: int = 0, best_cell_only: bool = False) -> None:
@@ -211,10 +156,8 @@ class ScalarImpl(Aligner):
         # Separate direction matrix also stored in ptr for traceback
         for _qname, qseq, _rname, rseq in self.pairs:
             pair_rec = Recorder(verbose=self.verbose)
-            if self.best_cell_only:
-                result = smith_waterman_best_cell(qseq, rseq, pen, pair_rec)
-            else:
-                result, h, ptr = smith_waterman_dp(qseq, rseq, pen, pair_rec)
+            result, h, ptr = smith_waterman_dp(qseq, rseq, pen, pair_rec)
+            if not self.best_cell_only:
                 traceback_alignment(qseq, rseq, h, ptr, result, pair_rec)
             self.results.append(result)
             self.pair_recs.append(pair_rec)

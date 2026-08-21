@@ -105,7 +105,7 @@ class CScalarImpl(Aligner):
         # Getting elements from class attributes
         num_pairs = len(self.pairs)
 
-        # This can be edited by dev for profiling
+        # This can be edited by developer for profiling
         N_FLOAT_COUNTERS = 0; # for example 1 or num_pairs and timing every pair in C code
         N_INT_COUNTERS = 0
         # Useful for storing info about matrices like timing and counters
