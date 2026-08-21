@@ -120,6 +120,16 @@ and `second_pass` (implementations listed in `_SECOND_PASS_IMPLS`). `--implement
 selects from `SCORING_REGISTRY` at runtime; the CLI choices list is derived from
 `sorted(SCORING_REGISTRY)` automatically.
 
+`--implementation-options [NAME|all]` prints what an implementation supports
+(`lanes`, `best_cell_only`, `second_pass`, `full_traceback`, `gpu`, plus a
+free-text note) and exits without aligning anything -- e.g.
+`--implementation-options hip_diagonal` to check whether it supports lanes or
+a full traceback. Backed by `sw_wrapper.IMPLEMENTATION_OPTIONS`
+(`lanes`/`second_pass`/`best_cell_only` are derived from the membership sets
+above so they can't drift; `full_traceback`/`gpu`/notes are hand-maintained
+facts in `_FULL_TRACEBACK`/`_GPU`/`_NOTES` -- update those three when adding
+a new implementation).
+
 ### scalar (`sw_implementations/scalar/__init__.py`)
 
 Standard affine-gap DP filling H, E, F and a pointer matrix.

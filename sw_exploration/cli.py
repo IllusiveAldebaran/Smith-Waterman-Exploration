@@ -21,13 +21,14 @@ from .output import (
     build_matrix_figure,
     build_summary_figure,
     farrar_time,
+    format_implementation_options,
     format_matrix,
     matrix_from_cell_events,
     next_output_path,
     smith_waterman_time,
     write_output,
 )
-from .sw_wrapper import SCORING_REGISTRY, create_impl
+from .sw_wrapper import IMPLEMENTATION_OPTIONS, SCORING_REGISTRY, create_impl
 from .sw_implementations.scalar import ScalarImpl
 
 
@@ -101,6 +102,15 @@ def parse_args() -> argparse.Namespace:
         "--implementation", default="farrar",
         choices=sorted(SCORING_REGISTRY),
         help="scoring implementation (default: farrar)",
+    )
+    parser.add_argument(
+        "--implementation-options", metavar="NAME", nargs="?", const="",
+        default=None,
+        help="print which options an implementation supports (lanes, "
+             "best_cell_only, second_pass, full_traceback, gpu) and exit "
+             "without aligning anything. NAME defaults to the implementation "
+             f"selected via --implementation; NAME=all lists every "
+             f"implementation ({', '.join(sorted(SCORING_REGISTRY))})",
     )
     parser.add_argument("--lanes", type=int, default=8,
                         help="number of SIMD lanes for farrar/c_farrar (default: 8)")
@@ -198,8 +208,37 @@ def build_pairs(args: argparse.Namespace) -> list[tuple[str, str, str, str]]:
     return pairs
 
 
+def print_implementation_options(name: str) -> None:
+    """Handle --implementation-options: print capability facts and return.
+
+    name == "" means "no NAME given" (flag present but bare) -> falls back
+    to whatever --implementation resolves to at the call site. name == "all"
+    prints every registered implementation.
+    """
+    if name == "all":
+        names = sorted(IMPLEMENTATION_OPTIONS)
+    elif name not in IMPLEMENTATION_OPTIONS:
+        available = ", ".join(sorted(IMPLEMENTATION_OPTIONS))
+        raise SystemExit(
+            f"--implementation-options: unknown implementation {name!r}; "
+            f"available: {available}, or 'all'"
+        )
+    else:
+        names = [name]
+
+    for n in names:
+        print(format_implementation_options(n, IMPLEMENTATION_OPTIONS[n]))
+        print()
+
+
 def main() -> None:
     args = parse_args()
+
+    if args.implementation_options is not None:
+        name = args.implementation_options or args.implementation
+        print_implementation_options(name)
+        return
+
     pairs = build_pairs(args)
     pen = parse_penalties(args.penalties)
 
