@@ -1,25 +1,44 @@
 # Smith-Waterman Exploration
- 
-The Smith-Waterman family of algorithm has had many slight differences and implementations. For academia and curiousness we explore how some of these implemenations fare in terms of instructions, computing, score, etc.
 
-Plain-Python instrumentation for Smith-Waterman local sequence alignment.
-Implements two variants — scalar affine-gap DP and Farrar's striped method —
-and records every major algorithmic event (cell fills, gap updates, lazy-F
-passes, profile loads, traceback steps) along with wall-clock timings, so you
-can answer questions like "how many DP cells does this fill?" or "how much time
-goes into Farrar's lazy-F correction?".
+The Smith-Waterman family of algorithms has many variants and implementation
+strategies. This repo explores how a few of them fare against each other —
+in score, timing, and internal event counts — from a plain Python reference
+implementation up through a HIP/GPU kernel.
+
+Every implementation records its major algorithmic events (cell fills, gap
+updates, lazy-F passes, profile loads) and stage timings through a shared
+`Recorder`, so runs can be compared and matrices/heatmaps visualised.
 
 ## Requirements
 
 - Python 3.10+
+- `cffi` (all implementations except plain `scalar` are cffi-backed)
 - `make` + a C++17 compiler + zlib (to build the FASTA reader)
-- `matplotlib` (only needed for `--preview` / `--heatmap`)
+- A C compiler on `PATH` (`c_scalar` compiles `scalar.c` via cffi the first
+  time it's instantiated)
+- `matplotlib` + `numpy` (only needed for `--preview` / `--heatmap` / `--summary`)
+- ROCm + `hipcc` (only needed to build `hip_diagonal`'s `libhipdiagonal.so`;
+  everything else works without a GPU)
 
 Build the FASTA reader shared library once before first use:
 
 ```bash
 make
 ```
+
+The `.so` this builds is only needed for `--query-file`/`--reference-file`
+input; every other input source works without it.
+
+`hip_diagonal` needs its own shared library, built separately:
+
+```bash
+cd sw_exploration/sw_implementations/hip_diagonal
+make            # builds libhipdiagonal.so (and dp_test, a standalone C++ dev harness)
+```
+
+`hip_diagonal.py` loads `libhipdiagonal.so` from its own directory by
+default; override the path with the `SWAG_DIAGONAL_HIP_LIB` environment
+variable if you build it elsewhere.
 
 ## Usage
 
@@ -34,10 +53,10 @@ sequence is a list of one pair; a FASTA file is a list of many.
 ### Input sources
 
 Sources may be freely combined. All pairs from all sources are concatenated and
-processed together.
+processed together; if nothing is specified, one built-in default pair is used.
 
 ```bash
-# built-in defaults (ACACACTA vs AGCACACA)
+# built-in default (ACACACTA vs AGCACACA)
 ./smith_waterman_exploration.py
 
 # inline sequences
@@ -52,33 +71,53 @@ processed together.
 ./smith_waterman_exploration.py \
   --random-count 32 \
   --query-length 64 \
-  --reference-length 64
+  --reference-length 64 \
+  --seed 1
 
 # combine sources — inline pair + 32 random pairs
 ./smith_waterman_exploration.py \
   --single-query ACGT --single-reference TGCA \
   --random-count 32
+
+# reverse every sequence, or swap query/reference for every pair
+./smith_waterman_exploration.py --random-count 8 --reverse
+./smith_waterman_exploration.py --random-count 8 --transpose
 ```
 
-### Output
+Random sequences are generated over the alphabet `ACGT`.
+
+## Implementations
+
+Select with `--implementation` (default: `farrar`).
+
+| Name           | GPU | `--lanes` | Full traceback     | Notes |
+|----------------|-----|-----------|---------------------|-------|
+| `scalar`       | no  | no        | yes                 | Reference affine-gap DP in pure Python. Fills H, E, F and a pointer matrix; correct, readable, and the ground truth for `--validate-scalar`. |
+| `farrar`       | no  | yes       | no                  | Farrar's striped method, simulated in Python with plain lists. Query residues are rearranged into SIMD-style vector segments; three recorded stages (profile build, main striped pass, lazy-F correction). |
+| `c_scalar`     | no  | no        | no                  | Same DP as `scalar`, but the fill loop is C, compiled via `cffi` the first time it's instantiated. |
+| `hip_diagonal` | yes | yes       | only with `--second-pass` | HIP/GPU kernel; a whole batch of pairs is packed and aligned in one kernel launch. H/E/F live and die on the device — only each pair's best score/location ever comes back to Python. |
+
+Run `--implementation-options NAME` (or `--implementation-options all`) to
+print what a specific implementation actually supports — whether it takes
+`--lanes`, whether `--best-cell-only`/`--second-pass` do anything for it, and
+a short note on its internals — without aligning anything:
 
 ```bash
-# print the H matrix for each pair
-./smith_waterman_exploration.py --show-matrix
+./smith_waterman_exploration.py --implementation-options hip_diagonal
+```
 
-# save a heatmap of lazy-F corrections grouped by (query_len × reference_len)
-./smith_waterman_exploration.py --random-count 100 \
-  --query-length 32 --reference-length 32 \
-  --heatmap results.png
-
-# open an interactive matplotlib window
-./smith_waterman_exploration.py --random-count 100 --preview
-
-# cross-check Farrar scores against scalar DP
-./smith_waterman_exploration.py --random-count 32 --validate-scalar
-
-# print progress per pair
-./smith_waterman_exploration.py --random-count 1000 --progress
+```text
+hip_diagonal:
+  lanes           yes
+  best_cell_only  yes
+  second_pass     yes
+  full_traceback  second_pass only
+  gpu             yes
+  notes: HIP/GPU diagonal-striped DP. H/E/F live and die on the device --
+          best_cell_only is a no-op there (nothing is ever copied back
+          regardless). --second-pass gets a real traceback via a scalar CPU
+          fallback per pair selected by _needs_backtrace() (currently a stub
+          that always returns True); there's no GPU traceback kernel yet.
 ```
 
 ## Options Reference
@@ -86,115 +125,160 @@ processed together.
 **Input**
 
 ```text
---single-query TEXT           inline query sequence
---single-reference TEXT       inline reference sequence  (alias: --single-target)
---query-file PATH             FASTA file of query sequences
---reference-file PATH         FASTA file of reference sequences  (alias: --target-file)
---random-count N              generate N random query/reference pairs
---query-length INT            length of each random query      default: 32
---reference-length INT        length of each random reference  default: 32
---alphabet TEXT               random sequence alphabet         default: ACGT
---seed INT                    RNG seed                         default: 0
+--single-query TEXT             inline query sequence
+--single-reference TEXT         inline reference sequence   (alias: --single-target)
+--query-file PATH               FASTA file of query sequences
+--reference-file PATH           FASTA file of reference sequences   (alias: --target-file)
+--random-count N                generate N random query/reference pairs
+--query-length INT              length of each random query        default: 32
+--reference-length INT          length of each random reference    default: 32
+--seed INT                      RNG seed                           default: 0
+--reverse                       reverse every sequence (query and reference)
+--transpose                     swap query and reference for every pair
 ```
 
 **Scoring**
 
 ```text
---match INT           substitution match score        default: 2
---mismatch INT        substitution mismatch score     default: -1
---gap-open INT        affine gap open penalty         default: 3
---gap-extend INT      affine gap extend penalty       default: 1
---implementation      scoring implementation          default: farrar
-                        choices: farrar, scalar
---lanes INT           Farrar vector lane count        default: 8
+--penalties M,X,DO,DE,IO,IE   six comma-separated int8 penalties: MATCH,MISMATCH,
+                                DEL_OPEN,DEL_EXT,INS_OPEN,INS_EXT.
+                                MATCH/MISMATCH are pre-negated: actual score delta
+                                is -MATCH on a match, -MISMATCH on a mismatch.
+                                default: -2,1,3,1,3,1  (= +2 reward / -1 penalty)
+--implementation NAME         scoring implementation              default: farrar
+                                choices: c_scalar, farrar, hip_diagonal, scalar
+--implementation-options [NAME]
+                               print NAME's supported options and exit without
+                                aligning anything; NAME defaults to --implementation,
+                                or use "all" to list every implementation
+--lanes INT                   SIMD lane count for farrar / hip_diagonal   default: 8
+--best-cell-only               track only the best cell's score/location, not the
+                                full H/E/F matrices, where an implementation
+                                supports it (see --implementation-options); the
+                                pure-Python implementations (scalar, farrar) get
+                                no memory benefit from this, only c_scalar/hip_diagonal do
+--second-pass                  hip_diagonal only: after the normal GPU best-cell
+                                pass, compute a real backtrace (currently for every
+                                pair — the real selection condition isn't implemented yet)
 ```
 
 **Output**
 
 ```text
---verbose 0|1|2       0: summary only  1: stage events per pair  2: full counters
-                        default: 0
---show-matrix         print the scalar DP H matrix for each pair
---heatmap PATH        save metric heatmap to file (format from extension: .png, .pdf, …)
---preview             open an interactive matplotlib window showing the heatmap
---heatmap-metric KEY  metric to plot in the heatmap (default: farrar.lazy_f_corrections)
---min-score INT       score threshold; enables score_pass_rate metric
---heatmap-overlay KEY overlay drawn on the matrix figure; may be repeated
-                        choices: lazy_f, match, mismatch
---csv PATH            output CSV path template (auto-numbered)  default: results.csv
---validate-scalar     also run scalar DP and flag score mismatches
---summary             show a per-pair bar chart (score + lazy-F) instead of H matrices
---progress            print progress per pair
+--verbose 0|1|2         0: summary only  1: stage events per pair  2: full counters
+                          default: 0
+--show-matrix           print the H matrix for each pair
+--show-triggers          print per-pair counts for every recorded cell-event trigger
+                          label (e.g. farrar.lazy_f_trigger)
+--heatmap PATH           save an H-matrix figure to file (.png, .pdf, …)
+--preview                open an interactive matplotlib window showing H matrices
+--annotate-heatmap       overlay each cell's score value on the heatmap
+--heatmap-overlay KEY    overlay drawn on the matrix figure; may be repeated
+                          choices: lazy_f, match, mismatch
+--summary                show a per-pair bar chart (mean score + lazy-F corrections,
+                          and timing) instead of H matrices; doesn't need a matrix
+--min-score INT          accepted but currently unused by any overlay or metric
+--validate-scalar        also run scalar DP and flag score mismatches
+--output PATH            accepted but not currently wired up -- no results file
+                          is written regardless of this flag (see Output below)
+--no-results             accepted, same caveat as --output
+--progress               accepted; currently a no-op
 ```
 
-## Heatmap
+## Visualisation
 
-`--heatmap` and `--preview` build a 2-D figure grouping pairs by
-`(query_len × reference_len)` and showing the average of the chosen metric per
-cell. When all pairs share the same length the figure is 1×1.
+`--show-matrix` prints each pair's H matrix as a text grid to the console.
 
-`--heatmap-metric` can be any count or timing key recorded by the Recorder.
-Useful choices:
+`--preview` / `--heatmap` build one matplotlib figure with one subplot per
+pair (an `imshow` of that pair's H matrix, query on the X axis, reference on
+the Y axis), unless `--summary` is also given, in which case a single bar
+chart of mean±std score/lazy-F-corrections (and timing, if any implementation
+recorded time) is built instead of per-pair matrices.
+
+Both need an H matrix to draw from. Not every implementation records one:
+`c_scalar`/`hip_diagonal` skip it under `--best-cell-only`, and
+`hip_diagonal` never records one at all regardless (see the table above). If
+none of the pairs being shown have a matrix, a warning is printed and nothing
+is drawn; add `--validate-scalar` to get a matrix via scalar DP as a fallback.
+
+`--heatmap-overlay` adds a marker layer on top of the matrix figure; may be
+repeated:
 
 ```text
-# count metrics
-farrar.lazy_f_corrections          how many times lazy-F actually propagated
-farrar.lazy_f_lane_passes          outer lazy-F iterations (includes mandatory first pass)
-farrar.lazy_f_segment_iterations
-farrar.main_segment_iterations
-farrar.best_score_updates
-score_pass_rate                    fraction of pairs meeting --min-score (requires --min-score)
-
-# timing metrics — prefix with time:
-time:farrar.profile_build
-time:farrar.main_striped_pass
-time:farrar.lazy_f_correction
+lazy_f      lime dots at H-matrix cells where Farrar's lazy-F correction fired
+match       green tint where query[i] == reference[j]
+mismatch    orange tint where query[i] != reference[j]
 ```
 
-When `--min-score` is set, cells with score ≥ N are highlighted in red in the
-matrix figure.
+```bash
+./smith_waterman_exploration.py \
+  --single-query CGGACTACGAG --single-reference ACGTACG \
+  --heatmap-overlay match --heatmap-overlay lazy_f \
+  --preview
+```
 
-## Output File
+## Output
 
-Results are written as JSON (default: `results.json`, auto-numbered to avoid
-overwriting). Top-level keys:
+Each pair's result is printed to the console as it's aligned:
 
 ```text
-metadata    scoring parameters and implementation name
-pairs       list of per-pair results
+pair 1/1: query x reference
+max_score=10 at (7, 6), dp_fill_time=0.000214s
 ```
 
-Each pair entry contains:
+`--verbose 1`/`2` additionally print every recorded `Recorder` event
+(counter increments, stage timings) for each pair; `--show-triggers` prints
+per-pair counts for every non-`h_matrix` cell-event label recorded (e.g. how
+many `farrar.lazy_f_trigger` cells fired).
 
-```text
-query_name, reference_name, query_seq, reference_seq
-query_len, reference_len
-score, end_query, end_reference
-lazy_f_corrections       total lazy-F outer iterations that propagated
-lazy_f_triggers          list of [row, col] H-matrix cells where lazy-F changed H
-score_mismatch           1 if scalar and chosen implementation disagree
-smith_waterman_time_s, farrar_time_s
-h_matrix                 full (m+1)×(n+1) H matrix, null if not computed
-```
+Internally, every pair's result (score, H matrix when available,
+score-mismatch flag against `--validate-scalar`, timing breakdown, and any
+`--second-pass` traceback) is collected into a `pairs_data` list — but as of
+this writing `--output`/`--no-results` aren't actually wired up to write it
+to a file (`output.write_output()` exists and can serialise it to JSON, it's
+just not called from `cli.main()` yet).
 
-`h_matrix` and `lazy_f_triggers` are populated only when the scalar DP runs
-(i.e. when `--show-matrix`, `--validate-scalar`, `--preview`, or `--heatmap`
-is set).
+## Adding a new implementation
 
-## Implementations
+Each implementation lives in its own subpackage under
+`sw_exploration/sw_implementations/`, not a flat `.py` file, so it can carry
+whatever else it needs (C/HIP sources, headers, its own `Makefile`) alongside
+its Python entry point.
 
-| Name     | Description |
-|----------|-------------|
-| `farrar` | Farrar's striped Smith-Waterman. Query residues are rearranged into SIMD-style vector segments; substitution scores are precomputed into a query profile. Three stages: profile build, main striped pass, lazy-F correction. |
-| `scalar` | Reference scalar affine-gap DP. Fills H, E, F matrices cell by cell. Correct and readable; used as the ground-truth score for `--validate-scalar`. |
+1. Create `sw_exploration/sw_implementations/myimpl/__init__.py` with a class
+   subclassing `Aligner` (`sw_exploration/types.py`):
+   ```python
+   class MyImpl(Aligner):
+       def __init__(self, verbose: int = 0, best_cell_only: bool = False) -> None:
+           self.verbose = verbose
+           self.best_cell_only = best_cell_only
+           self.rec = Recorder(verbose=verbose)
+           self.results: list[AlignmentResult] = []
+           self.pair_recs: list[Recorder] = []
 
-Adding a new implementation: create `sw_exploration/sw_implementations/myimpl.py`
-with a `run(query, reference, match, mismatch, gap_open, gap_extend, lanes, rec)`
-function and register it in `sw_exploration/sw_wrapper.py`.
+       def run(self, pen: array.array) -> None:
+           for _qname, qseq, _rname, rseq in self.pairs:
+               pair_rec = Recorder(verbose=self.verbose)
+               result = ...  # align qseq against rseq, returning AlignmentResult
+               self.results.append(result)
+               self.pair_recs.append(pair_rec)
+   ```
+2. Register it in `sw_exploration/sw_wrapper.py`:
+   ```python
+   from .sw_implementations import myimpl
+   SCORING_REGISTRY["myimpl"] = myimpl.MyImpl
+   ```
+   The CLI `--implementation` choices update automatically. `verbose` and
+   `best_cell_only` are passed to every implementation's constructor; add the
+   name to `_LANES_IMPLS`/`_SECOND_PASS_IMPLS` if it should also receive
+   `lanes`/`second_pass`. Add an entry to `_FULL_TRACEBACK`/`_GPU`/`_NOTES`
+   too so `--implementation-options` describes it correctly.
+
+See `CLAUDE.md` for the full internal data-flow and `Recorder` conventions.
 
 ## Examples
 
-**Align two sequences, validate Farrar against scalar DP, and preview the H matrix:**
+**Align two sequences, validate against scalar DP, and preview the H matrix:**
 
 ```bash
 ./smith_waterman_exploration.py \
@@ -204,8 +288,9 @@ function and register it in `sw_exploration/sw_wrapper.py`.
   --preview
 ```
 
-The preview window shows the 12×8 H matrix (query on X / reference on Y).
-Score mismatches between Farrar and scalar DP cause an immediate error.
+The preview window shows the H matrix (query on X, reference on Y).
+`score_mismatch` in the (would-be) output data flags disagreement between
+Farrar and scalar DP for that pair.
 
 ---
 
@@ -215,7 +300,6 @@ Score mismatches between Farrar and scalar DP cause an immediate error.
 ./smith_waterman_exploration.py \
   --single-query CGGACTACGAG \
   --single-reference ACGTACG \
-  --validate-scalar \
   --heatmap-overlay match \
   --heatmap-overlay lazy_f \
   --preview
@@ -226,15 +310,12 @@ mark cells where Farrar's lazy-F correction actually changed H.
 
 ---
 
-**Run 10 random pairs of length 40 with Farrar lane width 8, preview the H matrices:**
+**Run 10 random pairs with Farrar lane width 8, preview the H matrices:**
 
 ```bash
 ./smith_waterman_exploration.py \
-  --random-count 10 \
-  --query-length 40 \
-  --reference-length 40 \
-  --lanes 8 \
-  --preview
+  --random-count 10 --query-length 40 --reference-length 40 \
+  --lanes 8 --preview
 ```
 
 `--lanes 8` sets Farrar's stripe width. With query length 40 that gives
@@ -243,23 +324,36 @@ as subplots.
 
 ---
 
-**Run 10 random pairs and show a per-pair score summary instead of H matrices:**
+**Run 10 random pairs and show a per-pair score/timing summary instead of H matrices:**
 
 ```bash
 ./smith_waterman_exploration.py \
-  --random-count 10 \
-  --query-length 40 \
-  --reference-length 40 \
-  --summary \
-  --preview
+  --random-count 10 --query-length 40 --reference-length 40 \
+  --summary --preview
 ```
 
-`--summary` shows a bar chart of scores and lazy-F correction counts per pair.
-No scalar DP is run, so this is faster than the full matrix view.
+No H matrices are needed for `--summary`, so this is cheap even for large batches.
 
 ---
 
-**Align paired FASTA files, check the score range, then preview with match/mismatch overlays:**
+**GPU batch alignment, checking what hip_diagonal supports first:**
+
+```bash
+./smith_waterman_exploration.py --implementation-options hip_diagonal
+
+./smith_waterman_exploration.py \
+  --implementation hip_diagonal --lanes 128 \
+  --random-count 100000 --query-length 96 --reference-length 256 \
+  --seed 1 --best-cell-only
+```
+
+`--best-cell-only` matters here specifically because `hip_diagonal` is
+cffi/GPU-backed — it skips copying anything beyond each pair's best
+score/location back from the device.
+
+---
+
+**Align paired FASTA files, then preview with match/mismatch overlays:**
 
 ```bash
 # First pass — check scores, no matrix needed:
