@@ -35,6 +35,10 @@ sw_exploration/
     c_scalar/                # C-backed scalar DP via cffi
       __init__.py            # CScalarImpl -- compiles scalar.c at instantiation time
       scalar.c, swag.h
+    c_farrar/                # C-backed Farrar's striped method via cffi, SSW-kernel-backed
+      __init__.py            # CFarrarImpl -- compiles ssw_wrap.c + submodule's ssw.c
+      ssw_wrap.c, ssw_wrap.h
+      Complete-Striped-Smith-Waterman-Library/  # vendored SSW, git submodule
     hip_diagonal/            # HIP/GPU diagonal-striped DP
       __init__.py            # HIPDiagonalImpl -- loads libhipdiagonal.so via cffi dlopen
       diagonal.c, diagonal.h, diagonal.hip
@@ -171,6 +175,36 @@ via cffi's `ffibuilder.compile()` at instantiation time into `_swag_ffi`).
 buffer, makes a single `alignBatch()` call, then walks `H_buf` in Python to
 populate each pair's `"h_matrix"` `cell_events` -- that walk (not `H_buf`
 itself, which is one contiguous C allocation) is what `best_cell_only` skips.
+
+### c_farrar (`sw_implementations/c_farrar/__init__.py`)
+
+C-backed Farrar's striped method, but unlike `farrar` (which *simulates* the
+striped method with plain Python lists), `c_farrar` uses the vendored
+[Complete Striped Smith-Waterman Library](https://github.com/mengyao/Complete-Striped-Smith-Waterman-Library)
+(SSW, a git submodule at `c_farrar/Complete-Striped-Smith-Waterman-Library/`)
+as the actual SSE2 kernel, via `ssw_wrap.c`/`ssw_wrap.h` compiled together
+with the submodule's `ssw.c` into cffi's `_ssw_ffi` extension.
+
+SSW's `ssw_align()` internally runs up to three passes, gated by a `flag`
+argument, and `best_cell_only` maps directly onto that: `best_cell_only=True`
+→ `flag=0`, only the forward striped SIMD pass runs (score + end position).
+`best_cell_only=False` (the default) → also runs SSW's reverse SIMD pass
+(begin position) and a banded-DP pass that produces a real CIGAR, which
+`CFarrarImpl._decode_cigar()` walks into a `TracebackResult` per pair. So
+unlike every other implementation here, `c_farrar`'s full traceback is the
+*default* path, not something extra you opt into.
+
+SSW only has one affine gap cost applied to both insertions and deletions --
+no separate `ins_open`/`ins_ext` like our `Penalties` struct has.
+`CFarrarImpl._check_gap_penalties()` checks `del_open==ins_open` and
+`del_ext==ins_ext` at the top of `run()`, before packing anything or calling
+into C, and raises `SystemExit` if they don't match rather than silently
+aligning with the wrong cost.
+
+Pairs don't need uniform-length padding the way `c_scalar`/`hip_diagonal`
+require -- each pair gets its own independent `ssw_init()` call C-side, so
+`_align_batch()` just concatenates raw sequences with an explicit per-pair
+length array.
 
 ### hip_diagonal (`sw_implementations/hip_diagonal/__init__.py`)
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import argparse
 
-from .sw_implementations import c_scalar, farrar, scalar, hip_diagonal
+from .sw_implementations import c_farrar, c_scalar, farrar, scalar, hip_diagonal
 from .types import Aligner
 
 # ---------------------------------------------------------------------------
@@ -32,6 +32,7 @@ SCORING_REGISTRY: dict[str, type[Aligner]] = {
     "scalar":   scalar.ScalarImpl,
     "farrar":   farrar.FarrarImpl,
     "c_scalar": c_scalar.CScalarImpl,
+    "c_farrar": c_farrar.CFarrarImpl,
     "hip_diagonal": hip_diagonal.HIPDiagonalImpl,
 }
 
@@ -54,12 +55,14 @@ _FULL_TRACEBACK: dict[str, object] = {
     "scalar": True,
     "farrar": False,
     "c_scalar": False,
+    "c_farrar": "yes, unless best_cell_only",
     "hip_diagonal": "second_pass only",
 }
 _GPU: dict[str, bool] = {
     "scalar": False,
     "farrar": False,
     "c_scalar": False,
+    "c_farrar": False,
     "hip_diagonal": True,
 }
 _NOTES: dict[str, str] = {
@@ -81,6 +84,16 @@ _NOTES: dict[str, str] = {
         "C-backed scalar DP via cffi. best_cell_only skips copying H_buf "
         "into per-cell Recorder events, not the C-side fill itself. No ptr "
         "matrix is returned to Python, so no traceback path exists yet."
+    ),
+    "c_farrar": (
+        "C-backed Farrar's striped method via cffi, using the vendored SSW "
+        "library (SSE2) as the kernel instead of simulating it in Python. "
+        "best_cell_only=False (the default) gets a real traceback for free "
+        "-- SSW's own reverse pass + banded-DP cigar pass, decoded into a "
+        "TracebackResult here. Only supports one affine gap cost applied to "
+        "both insertions and deletions; run() raises SystemExit up front "
+        "if --penalties asks for asymmetric del/ins costs rather than "
+        "aligning with the wrong cost."
     ),
     "hip_diagonal": (
         "HIP/GPU diagonal-striped DP. H/E/F live and die on the device -- "

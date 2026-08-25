@@ -1,0 +1,3 @@
+[submodule "sw_exploration/sw_implementations/c_farrar/Complete-Striped-Smith-Waterman-Library"]
+	path = sw_exploration/sw_implementations/c_farrar/Complete-Striped-Smith-Waterman-Library
+	url = git@github.com:mengyao/Complete-Striped-Smith-Waterman-Library.git
