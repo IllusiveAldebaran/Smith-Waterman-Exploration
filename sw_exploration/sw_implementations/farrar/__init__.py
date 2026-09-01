@@ -22,8 +22,8 @@ from __future__ import annotations
 import array
 from math import ceil
 
-from .scalar import score_pair
-from ..types import Aligner, AlignmentResult, Recorder, NEG_INF
+from ..scalar import score_pair
+from ...types import Aligner, AlignmentResult, Recorder, NEG_INF
 
 
 def striped_index_to_query_index(segment: int, lane: int, seg_len: int) -> int:
@@ -244,11 +244,17 @@ def _run_pair(
 
 
 class FarrarImpl(Aligner):
-    """Farrar's striped Smith-Waterman implementation. lanes is set at construction."""
+    """Farrar's striped Smith-Waterman implementation. lanes is set at construction.
 
-    def __init__(self, lanes: int = 8, verbose: int = 0) -> None:
+    best_cell_only is accepted only for uniformity with create_impl()'s
+    kwargs -- it's a no-op here, same as _run_pair()'s always-on h_matrix /
+    farrar.lazy_f_trigger cell_events recording.
+    """
+
+    def __init__(self, lanes: int = 8, verbose: int = 0, best_cell_only: bool = False) -> None:
         self.lanes = lanes
         self.verbose = verbose
+        self.best_cell_only = best_cell_only
         self.rec = Recorder(verbose=verbose)
         self.results: list[AlignmentResult] = []
         self.pair_recs: list[Recorder] = []

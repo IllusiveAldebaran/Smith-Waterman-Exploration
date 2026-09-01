@@ -5,7 +5,7 @@ CINCLUDES := -Ikseqpp_lib/include
 
 CXX      = hipcc
 CXXFLAGS = -x hip -O2 -std=c++17 -lz
-CXXINCLUDES := -I../../kseqpp_lib/include
+CXXINCLUDES := -I../../../kseqpp_lib/include
 
 libhipdiagonal.so: diagonal.c diagonal.hip diagonal.h
 	$(CC) $(CFLAGS) $(CLFLAGS) $(INCLUDES) -o $@ $<

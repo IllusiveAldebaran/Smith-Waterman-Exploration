@@ -21,13 +21,14 @@ from .output import (
     build_matrix_figure,
     build_summary_figure,
     farrar_time,
+    format_implementation_options,
     format_matrix,
     matrix_from_cell_events,
     next_output_path,
     smith_waterman_time,
     write_output,
 )
-from .sw_wrapper import SCORING_REGISTRY, create_impl
+from .sw_wrapper import IMPLEMENTATION_OPTIONS, SCORING_REGISTRY, create_impl
 from .sw_implementations.scalar import ScalarImpl
 
 
@@ -102,8 +103,30 @@ def parse_args() -> argparse.Namespace:
         choices=sorted(SCORING_REGISTRY),
         help="scoring implementation (default: farrar)",
     )
+    parser.add_argument(
+        "--implementation-options", metavar="NAME", nargs="?", const="",
+        default=None,
+        help="print which options an implementation supports (lanes, "
+             "best_cell_only, second_pass, full_traceback, gpu) and exit "
+             "without aligning anything. NAME defaults to the implementation "
+             f"selected via --implementation; NAME=all lists every "
+             f"implementation ({', '.join(sorted(SCORING_REGISTRY))})",
+    )
     parser.add_argument("--lanes", type=int, default=8,
                         help="number of SIMD lanes for farrar/c_farrar (default: 8)")
+    parser.add_argument(
+        "--best-cell-only", action="store_true",
+        help="only track the best cell's score/location, not the full H/E/F "
+             "matrices; uses far less memory but --show-matrix/--preview/"
+             "--heatmap and traceback have no data to show afterwards",
+    )
+    parser.add_argument(
+        "--second-pass", action="store_true",
+        help="hip_diagonal only: after the normal GPU best-cell pass, run a "
+             "second pass that computes a real backtrace for pairs meeting a "
+             "selection condition. That condition isn't implemented yet, so "
+             "every pair currently qualifies",
+    )
 
     # --- output ---
     # TODO: fix the verbose argument to allow exlusivity between choices 0-3
@@ -185,8 +208,37 @@ def build_pairs(args: argparse.Namespace) -> list[tuple[str, str, str, str]]:
     return pairs
 
 
+def print_implementation_options(name: str) -> None:
+    """Handle --implementation-options: print capability facts and return.
+
+    name == "" means "no NAME given" (flag present but bare) -> falls back
+    to whatever --implementation resolves to at the call site. name == "all"
+    prints every registered implementation.
+    """
+    if name == "all":
+        names = sorted(IMPLEMENTATION_OPTIONS)
+    elif name not in IMPLEMENTATION_OPTIONS:
+        available = ", ".join(sorted(IMPLEMENTATION_OPTIONS))
+        raise SystemExit(
+            f"--implementation-options: unknown implementation {name!r}; "
+            f"available: {available}, or 'all'"
+        )
+    else:
+        names = [name]
+
+    for n in names:
+        print(format_implementation_options(n, IMPLEMENTATION_OPTIONS[n]))
+        print()
+
+
 def main() -> None:
     args = parse_args()
+
+    if args.implementation_options is not None:
+        name = args.implementation_options or args.implementation
+        print_implementation_options(name)
+        return
+
     pairs = build_pairs(args)
     pen = parse_penalties(args.penalties)
 
@@ -263,6 +315,23 @@ def main() -> None:
         if scalar_impl is not None:
             score_mismatch = scalar_impl.results[index].score != pair_best.score
 
+        # A real backtrace (aligned_query/aligned_reference/path) is only
+        # ever produced by an implementation's optional second pass (see
+        # hip_diagonal's --second-pass); it's independent of h_matrix, which
+        # is what --show-matrix/--preview/--heatmap consume. best_cell_only
+        # implementations supply neither.
+        traceback_result = None
+        impl_tracebacks = getattr(impl, "tracebacks", None)
+        if impl_tracebacks is not None and impl_tracebacks[index] is not None:
+            tb = impl_tracebacks[index]
+            traceback_result = {
+                "start_query": tb.start_query,
+                "start_reference": tb.start_reference,
+                "aligned_query": tb.aligned_query,
+                "aligned_reference": tb.aligned_reference,
+                "path": tb.path,
+            }
+
         pairs_data.append(
             {
                 "pair_index": index,
@@ -281,6 +350,8 @@ def main() -> None:
                 "smith_waterman_time_s": smith_waterman_time(pair_recorder.times),
                 "farrar_time_s": farrar_time(pair_recorder.times),
                 "h_matrix": h_matrix,
+                "backtrace_available": h_matrix is not None,
+                "traceback": traceback_result,
             }
         )
 
@@ -304,6 +375,21 @@ def main() -> None:
                 print(f"  {event}")
     # End of iterating through results
     # Anything afterward can be a summary or needed to loop through all elements first
+
+    # Checked after the fact (not implementation-by-implementation ahead of
+    # time) so this stays correct as implementations gain/lose h_matrix
+    # support: whatever the reason (best_cell_only, an implementation like
+    # hip_diagonal that never records h_matrix at all, ...), if none of the
+    # data --show-matrix/--preview/--heatmap need actually showed up, say so
+    # instead of silently rendering empty output.
+    if need_matrix_display and not any(p["h_matrix"] is not None for p in pairs_data):
+        print(
+            "warning: no H-matrix data was recorded for any pair -- "
+            "--show-matrix/--preview/--heatmap have nothing to display. "
+            "If --best-cell-only is set, try --validate-scalar too (it "
+            "always fills in a matrix via scalar DP)",
+            flush=True,
+        )
 
     print(
         f"Overall time ",

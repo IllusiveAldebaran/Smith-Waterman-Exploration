@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import array
 
-from ..types import Aligner, AlignmentResult, Recorder, TracebackResult, NEG_INF
+from ...types import Aligner, AlignmentResult, Recorder, TracebackResult, NEG_INF
 
 
 def score_pair(a: str, b: str, match: int, mismatch: int) -> int:
@@ -137,10 +137,17 @@ def traceback_alignment(
 
 
 class ScalarImpl(Aligner):
-    """Reference scalar affine-gap Smith-Waterman implementation."""
+    """Reference scalar affine-gap Smith-Waterman implementation.
 
-    def __init__(self, verbose: int = 0) -> None:
+    Pure Python, so there's no real memory/speed win to be had from a
+    separate reduced-tracking DP variant -- best_cell_only just skips the
+    traceback_alignment() call and reuses the AlignmentResult
+    smith_waterman_dp() already returns.
+    """
+
+    def __init__(self, verbose: int = 0, best_cell_only: bool = False) -> None:
         self.verbose = verbose
+        self.best_cell_only = best_cell_only
         self.rec = Recorder(verbose=verbose)
         self.results: list[AlignmentResult] = []
         self.pair_recs: list[Recorder] = []
@@ -150,7 +157,8 @@ class ScalarImpl(Aligner):
         for _qname, qseq, _rname, rseq in self.pairs:
             pair_rec = Recorder(verbose=self.verbose)
             result, h, ptr = smith_waterman_dp(qseq, rseq, pen, pair_rec)
-            traceback_alignment(qseq, rseq, h, ptr, result, pair_rec)
+            if not self.best_cell_only:
+                traceback_alignment(qseq, rseq, h, ptr, result, pair_rec)
             self.results.append(result)
             self.pair_recs.append(pair_rec)
             self.rec.add_time("smith_waterman.dp_fill", pair_rec.times.get("smith_waterman.dp_fill", 0.0))

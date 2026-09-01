@@ -52,6 +52,27 @@ def format_matrix(matrix: list[list[int]], query: str, reference: str) -> str:
     return "\n".join(lines)
 
 
+def format_implementation_options(name: str, opts: dict[str, object]) -> str:
+    """Render one implementation's capability facts (sw_wrapper.IMPLEMENTATION_OPTIONS)
+    for --implementation-options."""
+    import textwrap
+
+    lines = [f"{name}:"]
+    for key in ("lanes", "best_cell_only", "second_pass", "full_traceback", "gpu"):
+        value = opts.get(key)
+        rendered = {True: "yes", False: "no"}.get(value, str(value))
+        lines.append(f"  {key:<15} {rendered}")
+    notes = opts.get("notes")
+    if notes:
+        lines.append(
+            textwrap.fill(
+                str(notes), width=76,
+                initial_indent="  notes: ", subsequent_indent="          ",
+            )
+        )
+    return "\n".join(lines)
+
+
 def print_counts(title: str, counts: Counter[str], prefix: str | None = None) -> None:
     print(f"\n{title}:")
     for key in sorted(counts):
