@@ -29,6 +29,7 @@ void alignOneNpar(const uint16_t max_refLen, const uint16_t max_qryLen, const Pe
 // final answer) is needed by callers. Passing the whole batch's H/E/F back
 // to the host was the actual cause of MemoryError at large numAligns.
 void alignBatchNpar(const uint16_t max_refLen, const uint16_t max_qryLen, const Penalties penalties, const char* refSeq, const char* qrySeq, bestCell* best_cells, uint32_t numAligns, int npar, float* floatCounters, int nfC, int* intCounters, int niC);
+void alignBatchNpar_CellOnly(const uint16_t max_refLen, const uint16_t max_qryLen, const Penalties penalties, const char* refSeq, const char* qrySeq, bestCell* best_cells, uint32_t numAligns, int npar);
 }
 
 /*

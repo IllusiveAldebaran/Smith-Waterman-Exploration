@@ -1,5 +1,89 @@
 #include "diagonal.hip"
 
+void alignBatchNpar_CellOnly(const uint16_t max_refLen, const uint16_t max_qryLen, const Penalties penalties, const char* refSeq, const char* qrySeq, bestCell* best_cells, uint32_t numAligns, int npar){
+  
+  if(max_refLen > 1024) 
+  {
+    fprintf(stderr, "One thread per max reference length. Hardware limit is 1024. (max_refLen=%d)", max_refLen);
+  }
+  // total number of rows in our weird setup
+  size_t qryLenDiagonal = (size_t)numAligns * (max_qryLen + 1) + (max_refLen + 1) - 1;
+
+  // GPU Query
+  int deviceCount;
+  if (hipGetDeviceCount(&deviceCount) == hipSuccess) {
+      for (int i = 0; i < deviceCount; ++i) {
+          hipDeviceProp_t prop;
+          if (hipGetDeviceProperties(&prop, i) == hipSuccess)
+              printf("Device %d %s\n", i, prop.name);
+      }
+  }
+
+  hipDeviceProp_t props;
+  HIP_CHECK(hipGetDeviceProperties(&props, 0));
+  int compute_units = props.multiProcessorCount;
+
+  // GPU pointers
+  char* d_refSeq;
+  char* d_qrySeq;
+  struct bestCell* d_best_cells;
+  HIP_CHECK(hipMalloc(&d_refSeq, sizeof(*d_refSeq) * numAligns * (max_refLen+1)));
+  HIP_CHECK(hipMalloc(&d_qrySeq, sizeof(*d_qrySeq) * numAligns * (max_qryLen+1)));
+  HIP_CHECK(hipMalloc(&d_best_cells, numAligns * sizeof(*d_best_cells)));
+
+  // Copy Sequences, only prefixed padding
+  HIP_CHECK(hipMemcpy(d_refSeq, refSeq, numAligns*(max_refLen+1) * sizeof(char), hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_qrySeq, qrySeq, numAligns*(max_qryLen+1) * sizeof(char), hipMemcpyHostToDevice));
+  // this might be unecessary if we can initialize d_best_cells to all 0
+  HIP_CHECK(hipMemcpy(d_best_cells, best_cells, numAligns*sizeof(struct bestCell), hipMemcpyHostToDevice));
+
+  /*
+  printf("Comparing: ");
+  for(size_t i = 0; i<numAligns*max_refLen; i++) printf("%c", (refSeq[i] == 0) ? '0' : refSeq[i]);
+  printf("\nTo: ");
+  for(size_t i = 0; i<numAligns*max_qryLen; i++) printf("%c", (qrySeq[i] == 0) ? '0' : qrySeq[i]);
+  printf("\n");
+  */
+
+  // KERNEL CALL
+  // Shared memory holds shared_best (npar entries of bestCellTall, reduction
+  // scratch) and final_best (this block's own share of alignments, as
+  // bestCell -- see diagonal.hip, final_best is indexed relative to each
+  // block's own alignIndex range, not the whole batch's).
+  //    TODO: Changed to interwarp reductions and reduce shared memory for each thread
+  size_t GRID_SIZE = BLOCK_CU_RATIO*compute_units;
+  size_t fixedSharedBytes = npar * sizeof(struct bestCellTall);
+
+  // Check if kernel's shared memory fits on CU
+  if (fixedSharedBytes >= props.sharedMemPerBlock) {
+    // pathological: npar alone doesn't fit in one block's shared memory.
+    // Not fixable by adding blocks -- would need a smaller --lanes value.
+    fprintf(stderr, "alignBatchNpar: npar=%d alone needs %zu bytes of shared memory, "
+           "device only has %zu bytes per block -- reduce --lanes\n"
+           "Probably due to big difference in reference and query lengths\n",
+           npar, fixedSharedBytes, (size_t)props.sharedMemPerBlock);
+  } else {
+    size_t maxAlignsPerBlock = (props.sharedMemPerBlock - fixedSharedBytes) / sizeof(struct bestCell);
+    size_t minGridForSharedMem = ((size_t)numAligns + maxAlignsPerBlock - 1) / maxAlignsPerBlock;
+    if (minGridForSharedMem > GRID_SIZE) {
+      GRID_SIZE = minGridForSharedMem;
+    }
+  }
+
+  // Must match alignBatch's own ALIGNS_PER_BLOCK formula in diagonal.hip exactly.
+  size_t ALIGNS_PER_BLOCK = ((size_t)numAligns + GRID_SIZE - 1) / GRID_SIZE;
+  size_t sharedMemBytes = fixedSharedBytes + ALIGNS_PER_BLOCK * sizeof(struct bestCell);
+  alignBatch_CellOnly<<<GRID_SIZE, npar, sharedMemBytes>>>(max_refLen, max_qryLen, penalties, d_refSeq, d_qrySeq, d_best_cells, numAligns);//, fCount, 0, intCount, 0);
+  HIP_CHECK(hipDeviceSynchronize());
+
+  HIP_CHECK(hipMemcpy(best_cells, d_best_cells, numAligns*sizeof(bestCell), hipMemcpyDeviceToHost));
+  //printf("Best Cell: (%d, %d) diagonal aka (%d, %d) score: %d\n", best_cell->col, best_cell->row, best_cell->col, best_cell->row-best_cell->col, best_cell->score);
+
+  HIP_CHECK(hipFree(d_refSeq));
+  HIP_CHECK(hipFree(d_qrySeq));
+  HIP_CHECK(hipFree(d_best_cells));
+}
+
 void alignBatchNpar(const uint16_t max_refLen, const uint16_t max_qryLen, const Penalties penalties, const char* refSeq, const char* qrySeq, bestCell* best_cells, uint32_t numAligns, int npar, float* floatCounters, int nfC, int* intCounters, int niC){
   
   // total number of rows in our weird setup
@@ -93,7 +177,7 @@ void alignBatchNpar(const uint16_t max_refLen, const uint16_t max_qryLen, const 
 
   HIP_CHECK(hipFree(d_refSeq));
   HIP_CHECK(hipFree(d_qrySeq));
-  HIP_CHECK(hipFree(d_best_cells)); // was leaked before -- never freed
+  HIP_CHECK(hipFree(d_best_cells));
 }
 
 void alignOneNpar(const uint16_t refLen, const uint16_t qryLen, const Penalties penalties, const char* refSeq, const char* qrySeq, int16_t* H, int16_t* E, int16_t* F, bestCell* best_cell, int npar, float* floatCounters, int nfC, int* intCounters, int niC){

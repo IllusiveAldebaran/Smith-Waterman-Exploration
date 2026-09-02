@@ -74,6 +74,47 @@ class HIPDiagonalImpl(Aligner):
         self.tracebacks: list[TracebackResult | None] = []
         self._lib, self._ffi = _build_lib()
 
+    def _align_batchCellOnly(self, pen: array.array) -> None:
+        """Align a batch of reference and query pairs via the C kernel.
+        Packs all of the sequences together before passing into C kernel.
+        Best score of each pair is stored.
+
+        Records/Copies back into recorders
+        WARNING: No H/E/F mesh scores are saved. Thus no traceback is possible.
+        This function simply gets location of the best cell for each alignment.
+        """
+        # Getting elements from class attributes
+        num_pairs = len(self.pairs)
+
+        # padded lenngths, takes first item assumes all are the same length
+        max_reflen = len(self.pairs[0][3])
+        max_qrylen = len(self.pairs[0][1])
+        ref_bytes = b''.join((b'\x00' + str(pair[3]).encode('ascii')).ljust(max_reflen+1, b'\x00') for pair in self.pairs)
+        qry_bytes = b''.join((b'\x00' + str(pair[1]).encode('ascii')).ljust(max_qrylen+1, b'\x00') for pair in self.pairs)
+
+        # index by 0 to make it clear we're passing the value, not the pointer.
+        penalties = self._ffi.new("const struct Penalties*", list(pen))[0]
+        best_cell = self._ffi.new("struct bestCell[]", num_pairs)
+
+        with self.rec.timed("smith_waterman.dp_fill"):
+            self._lib.alignBatchNpar_CellOnly(
+                max_reflen, max_qrylen, penalties, ref_bytes, qry_bytes,
+                best_cell,
+                num_pairs,
+                self.lanes
+            )
+
+        for np in range(num_pairs):
+            # no longer records the H outputs... too many for one batch!
+            #pair_rec = Recorder()
+            #h_offset = np * (max_reflen+1) * (max_qrylen+1)
+            #res_offset =  (max_reflen+1) * (max_qrylen+1)
+            #for i in range(max_reflen+1):
+            #    for j in range(max_qrylen+1):
+            #        pair_rec.add_cell_event("h_matrix", j, i, H_buf[h_offset+j*(max_reflen+1)+i])
+            self.pair_recs.append(Recorder())
+            self.results.append(AlignmentResult(best_cell[np].score, best_cell[np].row, best_cell[np].col))
+
     def _align_batch(self, pen: array.array) -> None:
         """Align a batch of reference and query pairs via the C kernel.
         Packs all of the sequences together before passing into C kernel.
@@ -228,7 +269,10 @@ class HIPDiagonalImpl(Aligner):
             )
 
     def run(self, pen: array.array) -> None:
-        self._align_batch(pen)
+        if self.best_cell_only:
+            self._align_batchCellOnly(pen)
+        else:
+            self._align_batch(pen)
 
         if self.second_pass:
             self._second_pass_backtrace(pen)
