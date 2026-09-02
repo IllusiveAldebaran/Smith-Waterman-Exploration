@@ -22,6 +22,7 @@ void alignBatchNpar_CellOnly(const uint16_t max_refLen, const uint16_t max_qryLe
   hipDeviceProp_t props;
   HIP_CHECK(hipGetDeviceProperties(&props, 0));
   int compute_units = props.multiProcessorCount;
+  int warpSize = props.warpSize;
 
   // GPU pointers
   char* d_refSeq;
@@ -71,8 +72,10 @@ void alignBatchNpar_CellOnly(const uint16_t max_refLen, const uint16_t max_qryLe
   }
 
   // Must match alignBatch's own ALIGNS_PER_BLOCK formula in diagonal.hip exactly.
-  size_t ALIGNS_PER_BLOCK = ((size_t)numAligns + GRID_SIZE - 1) / GRID_SIZE;
-  size_t sharedMemBytes = fixedSharedBytes + ALIGNS_PER_BLOCK * sizeof(struct bestCell);
+  size_t aligns_per_block = ((size_t)numAligns + GRID_SIZE - 1) / GRID_SIZE;
+  size_t alignsBytes = aligns_per_block * sizeof(struct bestCell);
+  size_t mesh_sharing_bytes = 2 * sizeof(int16_t) * ((max_refLen+warpSize-1) / warpSize); // shiftScores() needs shared memory to share in between warps. 
+  size_t sharedMemBytes = fixedSharedBytes + alignsBytes + mesh_sharing_bytes;
   alignBatch_CellOnly<<<GRID_SIZE, npar, sharedMemBytes>>>(max_refLen, max_qryLen, penalties, d_refSeq, d_qrySeq, d_best_cells, numAligns);//, fCount, 0, intCount, 0);
   HIP_CHECK(hipDeviceSynchronize());
 

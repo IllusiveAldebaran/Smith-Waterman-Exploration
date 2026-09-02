@@ -36,9 +36,19 @@ typedef struct bestCellTall {
 /*
  * Shifts scores right.
  */
-__device__ __forceinline__ void shiftScores(int16_t& mesh, const uint16_t refLen, int tid, int bs, int bx){
-  mesh = __shfl_up(mesh, 1, bs);
-  if (tid == 0) mesh = 0;
+__device__ __forceinline__ void shiftScores(int16_t& mesh, int16_t* sharedInterwarp, const int warpSize, int tid){
+
+  int warp_id = tid/warpSize;
+  int warp_idx = tid % warpSize;
+  if (warp_idx == warpSize - 1) sharedInterwarp[warp_id] = mesh;
+  mesh = __shfl_up(mesh, 1);
+
+  __syncthreads();
+
+  if(warp_idx == 0) {
+    if (tid == 0) mesh = 0;
+    else mesh = sharedInterwarp[warp_id-1];
+  }
 }
 
 // /*
@@ -146,6 +156,10 @@ __global__ void alignBatch_CellOnly(const uint16_t max_refLen, const uint16_t ma
   // memory limit for large batches; each block only ever writes its own
   // range anyway, so it only needs to hold that much.
   bestCell* final_best = reinterpret_cast<bestCell*>(smem + (bs * sizeof(struct bestCellTall)));
+  // a bit to share in between blocks
+  int sizeOfSharingMesh = sizeof(int16_t) * ((max_refLen+warpSize-1) / warpSize);
+  int16_t* meshShareE = reinterpret_cast<int16_t*>(smem + (bs * sizeof(struct bestCellTall)) + ALIGNS_PER_BLOCK*sizeof(struct bestCell));
+  int16_t* meshShareH = reinterpret_cast<int16_t*>(smem + (bs * sizeof(struct bestCellTall)) + ALIGNS_PER_BLOCK*sizeof(struct bestCell) + sizeOfSharingMesh);
 
   // Each thread needs a way to keep track of `inflight` alignments at once,
   // since that many can be simultaneously active within one row.
@@ -295,9 +309,9 @@ __global__ void alignBatch_CellOnly(const uint16_t max_refLen, const uint16_t ma
       f_v = f_t;
 
       // h_h from our left thread is the same as h_h from this thread
-      shiftScores(h_t, max_refLen, tid, bs, bx);
+      shiftScores(h_t, meshShareH, warpSize, tid);
       h_h = h_t;
-      shiftScores(e_t, max_refLen, tid, bs, bx);
+      shiftScores(e_t, meshShareE, warpSize, tid);
       e_h = e_t;
     }
 
@@ -311,7 +325,8 @@ __global__ void alignBatch_CellOnly(const uint16_t max_refLen, const uint16_t ma
     // an alignment owned by an earlier block, and mislabels it as its own.
     size_t localDy = dy - GROUP_START;
     if(localDy > (refLen-1) &&  // The first qryLen rows are kind of like an offset. Sorry this isn't a place to be explaining it.
-	( (localDy+1) - (refLen-1) ) % qryLen == 0) { // give a qryLen offSet to dy because we finish an align every refLen after qryLen rows
+	( (localDy+1) - (refLen-1) ) % qryLen == 0) // give a qryLen offSet to dy because we finish an align every refLen after qryLen rows
+    {
       // Which double-buffer slot holds the alignment that just completed.
       // `alignIndex` (this block's tracked GLOBAL alignment index, not yet
       // incremented) is authoritative -- re-deriving the parity from dy via
