@@ -55,10 +55,39 @@ void alignBatchSSW(const Penalties penalties,
   const uint8_t weightGapO = (uint8_t)penalties.delOpen;
   const uint8_t weightGapE = (uint8_t)penalties.delExt;
 
-  int32_t refOff = 0, qryOff = 0;
+  // Per-pair offsets into refNums/qryNums, computed up front rather than as
+  // a running accumulator inside the alignment loop below -- a running
+  // accumulator is a loop-carried dependency (each iteration needs every
+  // prior iteration to have already run), which would make the loop below
+  // unsafe to parallelize. With offsets precomputed, every iteration is
+  // independent.
+  int32_t* refOffs = (int32_t*)malloc(sizeof(int32_t) * (numAligns > 0 ? numAligns : 1));
+  int32_t* qryOffs = (int32_t*)malloc(sizeof(int32_t) * (numAligns > 0 ? numAligns : 1));
+  {
+    int32_t refOff = 0, qryOff = 0;
+    for (int32_t i = 0; i < numAligns; i++) {
+      refOffs[i] = refOff;
+      qryOffs[i] = qryOff;
+      refOff += refLens[i];
+      qryOff += qryLens[i];
+    }
+  }
+
+  // Each iteration is now fully independent: its own ssw_init/ssw_align
+  // call, reading a disjoint (precomputed-offset) slice of refNums/qryNums,
+  // writing only to its own index i of best_cells/tracebacks. ssw.c has no
+  // shared mutable state (every s_profile*/s_align* is allocated fresh per
+  // call), so this is safe to run across threads. schedule(dynamic) because
+  // alignment cost scales with qryLen*refLen, which varies a lot pair to
+  // pair -- static chunking would leave some threads idle while others are
+  // stuck with the few long pairs. Falls back to a plain sequential loop
+  // when built without OpenMP.
+  #ifdef _OPENMP
+  #pragma omp parallel for schedule(dynamic)
+  #endif
   for (int32_t i = 0; i < numAligns; i++) {
-    const int8_t* refNum = refNums + refOff;
-    const int8_t* qryNum = qryNums + qryOff;
+    const int8_t* refNum = refNums + refOffs[i];
+    const int8_t* qryNum = qryNums + qryOffs[i];
     int32_t refLen = refLens[i];
     int32_t qryLen = qryLens[i];
 
@@ -95,11 +124,10 @@ void alignBatchSSW(const Penalties penalties,
     // along the cigar-generation path), so plain free() is correct either way.
     free(result);
     init_destroy(profile);
-
-    refOff += refLen;
-    qryOff += qryLen;
   }
 
+  free(refOffs);
+  free(qryOffs);
   free(refNums);
   free(qryNums);
 }
