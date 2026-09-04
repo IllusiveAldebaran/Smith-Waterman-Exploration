@@ -70,7 +70,14 @@ def _build_lib():
             os.path.join(_SSW_SRC, "ssw.c"),
         ],
         include_dirs=[_here, _SSW_SRC],
-        extra_compile_args=["-O3", "-march=native"],
+        # -fopenmp is needed at both compile and link time -- ssw_wrap.c's
+        # alignBatchSSW() parallelizes its per-pair loop with OpenMP (each
+        # pair is fully independent: its own ssw_init/ssw_align call, no
+        # shared mutable state in ssw.c). Without -fopenmp the #pragma is
+        # simply ignored by the compiler and the loop runs sequentially --
+        # not a build failure, just no speedup, on a toolchain that lacks it.
+        extra_compile_args=["-O3", "-march=native", "-fopenmp"],
+        extra_link_args=["-fopenmp"],
     )
 
     try:
