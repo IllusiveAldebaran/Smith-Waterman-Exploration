@@ -41,10 +41,11 @@ _LANES_IMPLS = {"farrar", "hip_diagonal"}
 
 # Implementations that accept a second_pass parameter at construction.
 _SECOND_PASS_IMPLS = {"hip_diagonal"}
+_BEST_SCORE_IMPLS = {"best_score"}
 
 # ---------------------------------------------------------------------------
 # Per-implementation capability facts for --implementation-options (cli.py).
-# `lanes`/`second_pass`/`best_cell_only` are derived from the membership sets
+# `lanes`/`second_pass`/`best_cell_only`/`best_score` are derived from the membership sets
 # and registry above so they can't drift from what create_impl() actually
 # does; `full_traceback`/`gpu`/notes are facts the sets above don't capture,
 # so they're kept here as plain data. When adding a new implementation, add
@@ -97,10 +98,10 @@ _NOTES: dict[str, str] = {
     ),
     "hip_diagonal": (
         "HIP/GPU diagonal-striped DP. H/E/F live and die on the device -- "
-        "best_cell_only is a no-op there (nothing is ever copied back "
-        "regardless). --second-pass gets a real traceback via a scalar CPU "
-        "fallback per pair selected by _needs_backtrace() (currently a stub "
-        "that always returns True); there's no GPU traceback kernel yet."
+        "best_cell_only and best_score is a no-op there (nothing is ever "
+        "copied back regardless). --second-pass gets a real traceback via a "
+        "scalar CPU fallback per pair selected by _needs_backtrace() (currently "
+        "a stub that always returns True); there's no GPU traceback kernel yet."
     ),
 }
 
@@ -109,8 +110,10 @@ def _build_implementation_options() -> dict[str, dict[str, object]]:
     return {
         name: {
             "lanes": name in _LANES_IMPLS,
-            "best_cell_only": True,  # every registered impl accepts it, see create_impl()
+            "best_cell_only": True,
+            "best_score": True,
             "second_pass": name in _SECOND_PASS_IMPLS,
+            "best_score": name in _BEST_SCORE_IMPLS,
             "full_traceback": _FULL_TRACEBACK.get(name, "unknown"),
             "gpu": _GPU.get(name, "unknown"),
             "notes": _NOTES.get(name, ""),
@@ -145,6 +148,8 @@ def create_impl(
         "best_cell_only": getattr(args, "best_cell_only", False),
     }
     # Haven't implemented different lanes right now (SSE, AVX2, AVX512)
+    if name in _BEST_SCORE_IMPLS:
+        kwargs["best_score"] = getattr(args, "best_score", False)
     if name in _LANES_IMPLS and args.lanes is not None:
         kwargs["lanes"] = args.lanes
     if name in _SECOND_PASS_IMPLS:

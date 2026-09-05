@@ -121,8 +121,14 @@ def parse_args() -> argparse.Namespace:
              "--heatmap and traceback have no data to show afterwards",
     )
     parser.add_argument(
+        "--best-score", action="store_true",
+        help="only track the best cell's score/location, not the full H/E/F "
+             "matrices; uses far less memory but --show-matrix/--preview/"
+             "--heatmap and traceback have no data to show afterwards",
+    )
+    parser.add_argument(
         "--second-pass", action="store_true",
-        help="hip_diagonal only: after the normal GPU best-cell pass, run a "
+        help="Not Yet implemented, but hip_diagonal only: after the normal GPU best-cell pass, run a "
              "second pass that computes a real backtrace for pairs meeting a "
              "selection condition. That condition isn't implemented yet, so "
              "every pair currently qualifies",

@@ -58,13 +58,355 @@ __device__ __forceinline__ void shiftScores(int16_t& mesh, int16_t* sharedInterw
 //   //TODO
 // }
 // 
-// /*
-//  * Gets max score
-//  */
-// __device__ constexpr void reduceMaxCell(int16_t mesh, int tid, const uint16_t refLen){
-//   //TODO
-// }
 
+/*
+ * Gets max score across all lanes
+ */
+__device__ __forceinline__ void reduceMax(int16_t& value, int16_t* sharedInterwarp, const int warpSize, int tid, const int totalThreads){
+  int warp_id = tid / warpSize;
+  int warp_idx = tid % warpSize;
+  // active in a warp
+  int lastWarpSize = ((totalThreads - 1) % warpSize) + 1;
+  int numWarps = (totalThreads+warpSize-1)/warpSize;
+  int activeThreads = (warp_id == numWarps - 1) ? lastWarpSize : warpSize;
+  uint64_t mask = (activeThreads >= warpSize) ? 0xFFFFFFFFFFFFFFFF : ((1ULL << activeThreads) - 1);
+
+  // Does a warp reduce
+  value = __reduce_max_sync(mask, value);
+
+  // if there are more threads than fit in a single warp, use shared memory then re-reduce
+  if(totalThreads > warpSize) 
+  {
+    if (warp_idx == 0) 
+    {
+      sharedInterwarp[warp_id] = value;
+    }
+    __syncthreads();
+    // everything should fit within a single warp reduce now
+    if(warp_id == 0) {
+      // TODO/WARNING: Written expecting wave32, as one pass per warp means with up to 
+      // 1024 threads means up to 32 threads in a second pass (as 32**2=1024)
+      // When running in wave64 a first reduction should mean only the first 16 should be active,
+      // as 1024 threads/(64 threads per warp)=16 threads
+      activeThreads = numWarps;
+      mask = (1ULL << activeThreads) - 1;
+      // basically just a mask getting value
+      if((1ULL << warp_idx) & mask) {
+        value = sharedInterwarp[tid];
+        // idk what's the point of having  a mask here tbh it just could be 0xFF..FF for all I care apparently
+        value = __reduce_max_sync(mask, value);
+      }
+      // apparently this causes an erroras others try to run and sync this instruction
+      //value = __reduce_max_sync(mask, value);
+    }
+  }
+}
+
+
+/* Diagonally prealigned
+ * Changes the algorithm in memory accesses, but it is essentially the same.
+ * Only needs score, nothing else leaves the CU
+ * npar is our number of threads
+ */
+__global__ void alignBatch_ScoreOnly(const uint16_t max_refLen, const uint16_t max_qryLen,
+			 const Penalties penalties,
+			 const char* refSeq, const char* qrySeq,
+			 int16_t* best_scores, uint32_t numAligns, uint16_t npar) {
+
+  // we have numAligns number of alignments, we divide evenly with blocks
+  const int ALIGNS_PER_BLOCK = (numAligns + gridDim.x - 1) / gridDim.x;
+  int tid = threadIdx.x;
+  int bs = blockDim.x;
+  int bx = blockIdx.x;
+
+  // we're going to treat refLens and qryLens as if their prefixed padding is part of the sequence
+  uint16_t refLen = max_refLen+1;
+  uint16_t qryLen = max_qryLen+1;
+
+  // We must keep our offset of our refIndex at all times
+  // This alignIndex records which align we're at. So if we're working on the 100th alignment pair
+  // This would be 100. Advances when it finishes the alignment.
+  const int alignIndexBase = blockIdx.x * ALIGNS_PER_BLOCK; // this block's first (global) alignment index
+  int alignIndex = alignIndexBase;
+  const size_t TOTAL_DP_ROWS = refLen + (numAligns * qryLen) - 1;
+
+  // Threads should be aligned as length of reference
+  if (tid > refLen) {
+      printf("Thread ID %d beyond reflen: %d", tid, refLen);
+      return;
+  };
+
+  // How many alignments can share a single antidiagonal row: a row spans up
+  // to refLen-1 columns, so qryInd can cross floor((refLen-1)/qryLen)
+  // alignment boundaries; +1 for the alignment it started in, +1 more for
+  // margin. Clamped to MAX_INFLIGHT_ALIGNS
+  // e.g: Say 5 aligns, each 4x13 (including padding in lengths)
+  //      (# is the alignment the cell is for)
+  //                  0
+  //                  0 0
+  //                  0 0 0
+  //                  0 0 0 0
+  //                 -1-0 0 0 0
+  //                 |1|1 0 0 0 0
+  //                 |1|1 1 0 0 0 0
+  //                 |1|1 1 1 0 0 0 0
+  //                 |2|1 1 1 1 0 0 0 0
+  //                 |2|2 1 1 1 1 0 0 0 0
+  //                 |2|2 2 1 1 1 1 0 0 0 0
+  // 0th alignment   |2|2 2 2 1 1 1 1 0 0 0 0
+  // done, perform   |3|2 2 2 2 1 1 1 1 0 0 0 0
+  // reduction and   |3|3 2 2 2 2 1 1 1 1 0 0 0 
+  //   record best   |3|3 3 2 2 2 2 1 1 1 1 0 0
+  //         score ->|3|3 3 3 2 2 2 2 1 1 1 1 0 Reduction of alignment 0 here
+  //                 |4|3 3 3 3 2 2 2 2 1 1 1 1
+  // inflight=4 as ->-4-4 3 3 3 3 2 2 2 2 1 1 1
+  // a single thread  4 4 4 3 3 3 3 2 2 2 2 1 1
+  // is keeping track 4 4 4 4 3 3 3 3 2 2 2 2 1 Reduction of alignment 1 here
+  // of 4 best scores   4 4 4 4 3 3 3 3 2 2 2 2
+  // until next align is  4 4 4 4 3 3 3 3 2 2 2
+  // ready for reduction    4 4 4 4 3 3 3 3 2 2
+  //                          4 4 4 4 3 3 3 3 2 Reduction of alignment 2 here
+  //                            4 4 4 4 3 3 3 3
+  //                              4 4 4 4 3 3 3
+  //                                4 4 4 4 3 3
+  //                                  4 4 4 4 3 Reduction of alignment 3 here
+  //                                    4 4 4 4
+  //                                      4 4 4
+  //                                        4 4
+  //                                          4 Reduction of alignment 4 here
+
+  const int inflight = min((int)((refLen - 1) / qryLen + 2), MAX_INFLIGHT_ALIGNS);
+  if (tid == 0 && blockIdx.x == 0 && (int)((refLen - 1) / qryLen + 2) > MAX_INFLIGHT_ALIGNS) {
+    printf("alignBatch: refLen/qryLen ratio needs %d in-flight slots, capped at %d -- results may be wrong\n",
+           (int)((refLen - 1) / qryLen + 2), MAX_INFLIGHT_ALIGNS);
+  }
+
+  // Space to store best_cell for reduction after every thread calculates a thread-local best cell
+  extern __shared__ char smem[];
+
+  // For this reason shared_best is our reduction space for work.
+  // Buffer used to copy the best of every align until the end of the kernel.
+  // Sized (by the host, see alignBatchNpar) and indexed for just THIS
+  // block's own ALIGNS_PER_BLOCK share, not the whole batch -- indices are
+  // alignIndex - alignIndexBase, i.e. block-relative. Sizing it for the
+  // whole numAligns (as before) blew past the device's per-block shared
+  // memory limit for large batches; each block only ever writes its own
+  // range anyway, so it only needs to hold that much.
+
+  // TODO: replace with npar or somehow count the number of threads
+  int wavesInWavefront = (max_refLen+warpSize-1)/warpSize;
+  int16_t* shared_best = reinterpret_cast<int16_t*>(smem);
+  int16_t* meshShareE = reinterpret_cast<int16_t*>(smem + (wavesInWavefront * sizeof(int16_t)));
+  int16_t* meshShareH = reinterpret_cast<int16_t*>(smem + 2 * (wavesInWavefront * sizeof(int16_t)));
+  int16_t* final_best = reinterpret_cast<int16_t*>(smem + 3 * (wavesInWavefront * sizeof(int16_t)));
+
+  // Each thread needs a way to keep track of `inflight` alignments at once,
+  // since that many can be simultaneously active within one row.
+  int16_t thread_best_score[MAX_INFLIGHT_ALIGNS];
+  for (int i = 0; i < MAX_INFLIGHT_ALIGNS; i++) thread_best_score[i] = 0;
+
+  const int8_t penMatch     = penalties.match;
+  const int8_t penMisMatch  = penalties.mismatch;
+  const int8_t penDelOpen   = penalties.delOpen;
+  const int8_t penDelExt    = penalties.delExt;
+  const int8_t penInsOpen   = penalties.insOpen;
+  const int8_t penInsExt    = penalties.insExt;
+
+  
+  // GROUP_START/GROUP_END are THIS block's own alignment-index boundaries
+  // (in qryInd space), not the whole batch's. Each block must ramp up at its
+  // own start and ramp down at its own end so it never reads/writes a cell
+  // that belongs to a neighboring block. This ensures overlaps between blocks
+  // don't affect each other.
+  const size_t GROUP_START = (size_t)alignIndex * qryLen;
+  const size_t GROUP_END = (size_t)(alignIndex + ALIGNS_PER_BLOCK) * qryLen;
+  const size_t ROW_END = std::min<size_t>(GROUP_END + refLen, TOTAL_DP_ROWS);
+
+  // GROUP_START ->                    
+  //                  *                    
+  // dy starts   ->   * *                  
+  //      ↓           * * *                
+  //  moves down      * * * *     dy marks right
+  //                  * * * * * ⬐ bound in a row
+  //                  * * * * * *          
+  //                  * * * * * * *        
+  //                  * * * * * * * *      
+  //                  * * * * * * * * *    
+  //                  * * * * * * * * * *  
+  //                  * * * * * * * * * * *
+  //                  * * * * * * * * * * * *
+  //                  * * * * * * * * * * * * *
+  //                  * * * * * * * * * * * * *
+  //                  * * * * * * * * * * * * *
+  //                  *.......................*
+  //                  *...multiple alignments * 
+  //                  *...happen for a while .* 
+  //                  *.......................*
+  //                  * * * * * * * * * * * * *
+  //                  * * * * * * * * * * * * *
+  // GROUP_END ->     * * * * * * * * * * * * *
+  //                    * * * * * * * * * * * *
+  //                      * * * * * * * * * * *
+  //        dx marks left ⬏ * * * * * * * * * *
+  //       bound in a row     * * * * * * * * *
+  //                            * * * * * * * *
+  //                              * * * * * * *
+  //                                * * * * * *
+  //                                  * * * * *
+  //                                    * * * *
+  //                                      * * *
+  //                                        * *
+  // ROW_END ->                               *
+
+  // Using these variables to keep track with vgpr
+  // _v for vertical, _h for horizontal, _d = diagonal, _t for our target cell
+  // Though for our diagonal format this means:
+  // [d] [v]    [d]
+  // [h] [t] -> [h] [v]
+  //                [t]
+  int16_t h_d = 0; 
+  int16_t f_v = 0; int16_t h_v = 0;
+  int16_t e_h = 0; int16_t h_h = 0;
+  int16_t e_t = 0; int16_t f_t = 0; int16_t h_t;
+
+  // Start 2 rows past GR UP_START: the smallest dy with a real (non-padding)
+  // cell for this group is dx=1, qryInd=GROUP_START+1, i.e. dy=GROUP_START+2.
+  // Rows GROUP_START/GROUP_START+1 are boundary/padding cells that are either
+  // owned by the previous block or fall out of range on both sides -- either
+  // way this block must not touch them (also avoids dy-GROUP_START underflow
+  // in dx_hi below, since dy is unsigned).
+  for(size_t dy = GROUP_START + 2; dy < ROW_END; dy++) {
+
+    // Bounds for the initial and final paddings, now relative to THIS
+    // block's own group instead of the whole batch.
+    size_t dx_lo = (dy >= GROUP_END) ? (dy - GROUP_END + 1) : 1;
+    size_t dx_hi = (dy < GROUP_START + refLen) ? (dy - GROUP_START - 1) : (refLen - 1);
+    // dx_lo is never 0 because 0th column is just padding and dependency addressing breaks
+
+    // Control variable
+    size_t qryInd = dy - dx_lo; // The index of our dy character in query
+    size_t refOff = refLen*alignIndex;
+
+    // iterate through all cols but select to do run the alignment algorithm or not.
+    // Makes vectorization (and possibly later on batched alignment) possible
+    // check beyond diagonal.
+    // Example in (dy, dx) (2, 3) does not exist as its padded area
+    //printf("Traversing from col: %zu to %zu row:%zu\n", dx_lo, dx_hi, dy); 
+    {
+      //for(size_t dx = dx_lo + tid; dx <= dx_hi; dx += bs)
+      size_t dx = 1 + tid;
+      if(dx >= dx_lo && dx <= dx_hi)
+      {
+        qryInd = dy-dx;
+        refOff = (qryInd/qryLen)*refLen; // need to check when we're looking at the next sequence
+        size_t curAlignIndex = qryInd/qryLen; // like alignIndex but the one this cell is currently on, not which pair we're actively completing
+        size_t refInd = dx + refOff; // sometimes we need to move by refLen forward
+
+        h_t = (refSeq[refInd]==qrySeq[qryInd]) ? -penMatch : -penMisMatch;
+        //printf("Comparing %c with %c, %hd match!\n", refSeq[dx], qrySeq[qryInd], h_t);
+
+        // small guardrail to check if it's the first 'row' in this alignment, since the 'diagonal' value would be a previous batch
+        h_t += (qrySeq[qryInd-1] != 0) ? h_d : 0;
+
+
+        // update E,F,H
+        e_t = std::max(e_h - penDelExt, h_h - penDelOpen);
+        f_t = std::max(f_v - penInsExt, h_v - penInsOpen);
+        //printf("Scores are: E:%d F:%d cellScore:%d \n", e_t, f_t, h_t);
+        //printf("Scores at (%zu, %zu) : (H,E,F) (%d, %d, %d)\n", dx, dy, h_t, e_t, f_t);
+        h_t = std::max(std::max(h_t, (int16_t)0), std::max(e_t, f_t));
+
+        
+        // stupid guard rail two see if we are in padding. Overwrites a garbage scores to reset them all to 0 for next batch
+        if(refSeq[refInd] == 0 || qrySeq[qryInd] == 0) {
+          //printf("We're in padding all scores 0's out at (%zu,%zu) refSeq[%zu] qrySeq[%zu]\n", dx, dy, refInd, dy);
+          h_t = 0;
+          e_t = 0;
+          f_t = 0;
+        }
+
+        // Check to see if it's the best alignment. If its better, then record it.
+        {
+          // alignment Double Buffer Index, into this thread's own local slots
+          int alignDBI = curAlignIndex % inflight;
+
+          if (h_t > (int16_t)thread_best_score[alignDBI]) {
+            thread_best_score[alignDBI] = (uint16_t)h_t;
+          }
+        }
+      }
+    }
+    // assume calculation of row is complete, therefore we can shift our values to keep scores our meshes next thread
+    // note our refLen is max_refLen+1, but we write to minimum column 1, ignoring column 0 as it is just padding
+    // essentially move everything up, with the shifts moving right too
+    {
+      h_v = h_t;
+      h_d = h_h;
+      f_v = f_t;
+
+      // h_h from our left thread is the same as h_h from this thread
+      shiftScores(h_t, meshShareH, warpSize, tid);
+      h_h = h_t;
+      shiftScores(e_t, meshShareE, warpSize, tid);
+      e_h = e_t;
+    }
+
+    // every thread must finish writing to the row
+    __syncthreads();
+
+    // check if we're at a reduction point because an alignment is done
+    // So we should perform reduction. This periodicity is relative to
+    // GROUP_START, not the raw dy -- otherwise a block starting partway
+    // through the batch sees the trigger fire at a phase that belongs to
+    // an alignment owned by an earlier block, and mislabels it as its own.
+    size_t localDy = dy - GROUP_START;
+    if(localDy > (refLen-1) &&  // The first qryLen rows are kind of like an offset. Sorry this isn't a place to be explaining it.
+	( (localDy+1) - (refLen-1) ) % qryLen == 0) // give a qryLen offSet to dy because we finish an align every refLen after qryLen rows
+    {
+      // Which double-buffer slot holds the alignment that just completed.
+      // `alignIndex` (this block's tracked GLOBAL alignment index, not yet
+      // incremented) is authoritative -- re-deriving the parity from dy via
+      // the periodicity formula implicitly assumed GROUP_START==0 and broke
+      // for blocks whose first owned alignment has an odd global index.
+      int alignDBI = alignIndex % inflight;
+
+      // Read input from front buffer to shared
+      int16_t score = thread_best_score[alignDBI];
+      
+      // Shared reduction, using intrinsics (yay!)
+      reduceMax(score, shared_best, warpSize, tid, npar);
+      __syncthreads();
+
+      // save the best thread into shared space for best alignment per pair + fix absolute index -> relative index
+      if(tid == 0) {
+        int localAlignIndex = alignIndex - alignIndexBase; // final_best is block-relative
+        final_best[localAlignIndex] = score;
+      }
+
+      __syncthreads();
+      // need to wipe this slot back to 0
+      thread_best_score[alignDBI] = 0;
+
+      // all threads are complete with this alignment pair
+      alignIndex++;
+
+      __syncthreads();
+    }
+  }
+
+  // Write results from shared to back main buffer.
+  // Only write the slice of alignments THIS block actually owns -- looping
+  // over all numAligns here would let every block race to overwrite every
+  // other block's results in the global best_cells array. final_best itself
+  // is now block-relative sized/indexed (see above), so index it by
+  // i - alignStart to read back the same slice.
+  int alignStart = blockIdx.x * ALIGNS_PER_BLOCK;
+  int alignStop = min((int)(alignStart + ALIGNS_PER_BLOCK), (int)numAligns);
+  for(int i = alignStart + tid; i < alignStop; i++) {
+    best_scores[i] = final_best[i - alignStart];
+    //printf("HIP Final %d: %d\n", i, best_scores[i]);
+  }
+}
 
 /* Diagonally prealigned
  * Changes the algorithm in memory accesses, but it is essentially the same.
@@ -254,9 +596,9 @@ __global__ void alignBatch_CellOnly(const uint16_t max_refLen, const uint16_t ma
     // Example in (dy, dx) (2, 3) does not exist as its padded area
     //printf("Traversing from col: %zu to %zu row:%zu\n", dx_lo, dx_hi, dy); 
     {
-      //for(size_t dx = dx_lo + tid; dx <= dx_hi; dx += bs) { 
+      //for(size_t dx = dx_lo + tid; dx <= dx_hi; dx += bs)
       size_t dx = 1 + tid;
-      if(dx <= dx_hi)
+      if(dx >= dx_lo && dx <= dx_hi)
       {
         qryInd = dy-dx;
         refOff = (qryInd/qryLen)*refLen; // need to check when we're looking at the next sequence

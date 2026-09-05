@@ -30,6 +30,7 @@ void alignOneNpar(const uint16_t max_refLen, const uint16_t max_qryLen, const Pe
 // to the host was the actual cause of MemoryError at large numAligns.
 void alignBatchNpar(const uint16_t max_refLen, const uint16_t max_qryLen, const Penalties penalties, const char* refSeq, const char* qrySeq, bestCell* best_cells, uint32_t numAligns, int npar, float* floatCounters, int nfC, int* intCounters, int niC);
 void alignBatchNpar_CellOnly(const uint16_t max_refLen, const uint16_t max_qryLen, const Penalties penalties, const char* refSeq, const char* qrySeq, bestCell* best_cells, uint32_t numAligns, int npar);
+void alignBatchNpar_ScoreOnly(const uint16_t max_refLen, const uint16_t max_qryLen, const Penalties penalties, const char* refSeq, const char* qrySeq, int16_t* best_scores, uint32_t numAligns, int npar);
 }
 
 /*
